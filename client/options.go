@@ -17,6 +17,8 @@ package client
 import (
 	"crypto/tls"
 	"time"
+
+	utls "github.com/sardanioss/utls"
 )
 
 // ClientConfig holds all configuration options for the HTTP client.
@@ -143,6 +145,14 @@ type ClientConfig struct {
 	// Useful when you need full control over HTTP headers while keeping the TLS fingerprint.
 	// Default: false.
 	TLSOnly bool
+
+	// SessionCache is an external TLS session cache shared across proxy switches.
+	// When set, all HostPools created by this client use this cache instead of
+	// creating isolated per-pool caches. This enables TLS session resumption (PSK)
+	// to survive SetTCPProxy calls — a ticket cached during a residential proxy
+	// request is presented on the subsequent datacenter proxy connection.
+	// Default: nil (each HostPool creates its own isolated LRU cache).
+	SessionCache utls.ClientSessionCache
 }
 
 // DefaultConfig returns default client configuration
@@ -445,6 +455,32 @@ func WithECHFrom(domain string) Option {
 func WithDisableECH() Option {
 	return func(c *ClientConfig) {
 		c.DisableECH = true
+	}
+}
+
+// WithSessionCache sets a shared TLS session cache for PSK resumption across
+// proxy switches. When a client does a residential proxy request (priming a
+// TLS session ticket), then calls SetTCPProxy to switch to a datacenter proxy,
+// the ticket from the residential connection is preserved in this cache and
+// presented on the new datacenter TLS handshake — enabling PSK resumption
+// with the same Cloudflare edge.
+//
+// Without this option, each HostPool creates its own isolated LRU cache that
+// is destroyed when SetTCPProxy calls CloseAllPools.
+//
+// Example:
+//
+//	cache := utls.NewLRUClientSessionCache(64)
+//	c := client.NewClient("chrome-143",
+//	    client.WithSessionCache(cache),
+//	    client.WithTCPProxy(residentialProxyURL),
+//	)
+//	c.Get(ctx, targetURL, nil) // prime: ticket cached
+//	c.SetTCPProxy(dcProxyURL)  // switch: cache survives
+//	c.Get(ctx, targetURL, nil) // resume: ticket presented → PSK
+func WithSessionCache(cache utls.ClientSessionCache) Option {
+	return func(c *ClientConfig) {
+		c.SessionCache = cache
 	}
 }
 
