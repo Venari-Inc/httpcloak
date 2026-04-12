@@ -135,6 +135,12 @@ func NewClient(presetName string, opts ...Option) *Client {
 		h2Manager = pool.NewManagerWithTLSConfig(preset, config.InsecureSkipVerify)
 	}
 
+	// Inject shared TLS session cache if provided. Must happen before any
+	// connections are opened so all HostPools inherit the shared cache.
+	if config.SessionCache != nil {
+		h2Manager.SetSessionCache(config.SessionCache)
+	}
+
 	// Set IPv4 preference on DNS cache if configured
 	if config.PreferIPv4 {
 		h2Manager.GetDNSCache().SetPreferIPv4(true)
