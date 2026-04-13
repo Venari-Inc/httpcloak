@@ -352,15 +352,27 @@ func (p *HostPool) createConn(ctx context.Context) (*Conn, error) {
 	var specToUse *utls.ClientHelloSpec
 	var tlsConn *utls.UConn
 
-	// Prefer PSK spec when available - Chrome always includes PSK extension structure
-	if p.cachedPSKSpec != nil && p.preset.PSKClientHelloID.Client != "" {
-		// Generate fresh PSK spec for this connection
+	// Check if the session cache has an entry for this host. Real Chrome uses
+	// a non-PSK ClientHello on first visit (fewer extensions, rarer JA4
+	// fingerprint) and only includes the PSK extension on revisits when it has
+	// a cached session ticket. Using the PSK spec unconditionally produces a
+	// JA4 fingerprint that Cloudflare associates with bots (ips_rank 8),
+	// causing low bot scores on datacenter IPs.
+	hasCachedSession := false
+	if p.sessionCache != nil {
+		if cs, ok := p.sessionCache.Get(p.sniHost); ok && cs != nil {
+			hasCachedSession = true
+		}
+	}
+
+	if hasCachedSession && p.cachedPSKSpec != nil && p.preset.PSKClientHelloID.Client != "" {
+		// Resumption: use PSK spec so the cached ticket is offered
 		if spec, err := utls.UTLSIdToSpecWithSeed(p.preset.PSKClientHelloID, p.shuffleSeed); err == nil {
 			specToUse = &spec
 		}
 	}
 	if specToUse == nil && p.cachedSpec != nil {
-		// Generate fresh regular spec
+		// First visit (or PSK spec generation failed): use regular spec
 		if spec, err := utls.UTLSIdToSpecWithSeed(p.preset.ClientHelloID, p.shuffleSeed); err == nil {
 			specToUse = &spec
 		}
@@ -374,16 +386,16 @@ func (p *HostPool) createConn(ctx context.Context) (*Conn, error) {
 			return nil, fmt.Errorf("failed to apply TLS preset: %w", err)
 		}
 	} else {
-		// Fallback to ClientHelloID if spec generation failed - prefer PSK variant
+		// Fallback to ClientHelloID if spec generation failed
 		clientHelloID := p.preset.ClientHelloID
-		if p.preset.PSKClientHelloID.Client != "" {
+		if hasCachedSession && p.preset.PSKClientHelloID.Client != "" {
 			clientHelloID = p.preset.PSKClientHelloID
 		}
 		tlsConn = utls.UClient(rawConn, tlsConfig, clientHelloID)
 	}
 
-	// Only enable session cache if we have PSK spec - prevents panic when session
-	// is cached but spec doesn't have PSK extension (TOCTOU race mitigation)
+	// Enable session cache on the UConn so tickets received during handshake
+	// are stored (first visit) and cached tickets are offered (revisit).
 	if p.cachedPSKSpec != nil {
 		tlsConn.SetSessionCache(p.sessionCache)
 	}
