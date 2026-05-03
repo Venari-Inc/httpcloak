@@ -80,6 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **JSON preset spec expanded** — `key_share_curves`, `delegated_credential_algorithms`, and QUIC H3 fields (`connection_id_length`, `max_datagram_frame_size`) are now first-class JSON fields. Inheritance, mutual exclusion validation, and deep-copy behavior are hardened in the loader.
 - **H2 settings order is dynamic per browser type** — Matches what real Chrome/Firefox/Safari send instead of a shared static order.
 
+## [v1.6.2-venari.3] - 2026-05-02
+
+> Private fork release (Venari-Inc/httpcloak). Not planned for upstream.
+
+### Fixed
+
+- **Per-dial proxy IP failover with handshake-aware retry** — `dialHTTPProxy` and `dialSOCKS5Proxy` previously used only the first resolved A record (`proxyIPs[0]`). When `us.proxy.geonode.io` resolved to multiple A records and one degraded, residential traffic wedged on the dead IP. Both paths now iterate every resolved IP via a shared `dialAllIPs` helper that splits `connectTimeout` across attempts (capped at 10s, floored at 2s — mirrors `transport/http2_transport.go`). The proxy handshake (HTTP CONNECT / SOCKS5 auth) runs once on the first successful TCP conn; handshake errors (407, SOCKS5 status≥2, malformed responses) propagate immediately without cross-IP retry — they are auth/protocol failures, not IP-specific transport failures.
+- **IPv4 filter on resolved proxy IPs** — `filterIPv4` strips AAAA records before the dial loop. Residential proxies frequently advertise unreachable IPv6 addresses from our egress.
+
+### Added
+
+- 5 new tests in `pool/pool_dial_proxy_test.go` covering: first-dead-second-healthy failover, all-unreachable error wrapping with bounded wall clock, handshake-error propagation without cross-IP retry, per-IP timeout floor/cap arithmetic, and IPv4 filtering.
+
 ## [1.6.1] - 2026-03-16
 
 ### Added
