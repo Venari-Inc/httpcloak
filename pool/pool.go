@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -694,6 +695,72 @@ func lastIndexOf(s, substr string) int {
 	return -1
 }
 
+// filterIPv4 keeps only IPv4 addresses from a list of resolved IPs.
+// Residential proxies frequently advertise AAAA records that are unreachable
+// from our egress; filtering keeps the dial loop honest.
+func filterIPv4(ips []string) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// perIPTimeout computes the per-attempt timeout for a multi-IP dial.
+// Splits totalTimeout evenly across ips, capped at 10s and floored at 2s.
+// Mirrors the canonical pattern in transport/http2_transport.go:373-374.
+func perIPTimeout(totalTimeout time.Duration, numIPs int) time.Duration {
+	if numIPs <= 0 {
+		return totalTimeout
+	}
+	per := totalTimeout / time.Duration(numIPs)
+	if per > 10*time.Second {
+		per = 10 * time.Second
+	}
+	if per < 2*time.Second {
+		per = 2 * time.Second
+	}
+	return per
+}
+
+// dialAllIPs attempts to dial each proxy IP in turn with a per-attempt timeout
+// budget. Returns on the first successful TCP connection. On full failure,
+// returns an error wrapping the last dial error and naming the count of IPs.
+//
+// host is the original proxy hostname, included in per-attempt logs so operators
+// can correlate failures back to the resolved DNS name.
+func dialAllIPs(
+	ctx context.Context,
+	host string,
+	ips []string,
+	port string,
+	dialer func(ctx context.Context, addr string) (net.Conn, error),
+	totalTimeout time.Duration,
+) (net.Conn, error) {
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no IP addresses to dial for host %s", host)
+	}
+
+	perAddr := perIPTimeout(totalTimeout, len(ips))
+
+	var lastErr error
+	for _, ip := range ips {
+		addr := net.JoinHostPort(ip, port)
+		dialCtx, cancel := context.WithTimeout(ctx, perAddr)
+		conn, err := dialer(dialCtx, addr)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		log.Printf("[httpcloak] proxy dial host=%s ip=%s err=%v", host, ip, err)
+		lastErr = err
+	}
+
+	return nil, fmt.Errorf("all %d proxy IPs failed: %w", len(ips), lastErr)
+}
+
 // dialHTTPProxy establishes a connection through an HTTP CONNECT proxy
 func (p *HostPool) dialHTTPProxy(ctx context.Context, proxy *proxyConfig) (net.Conn, error) {
 	// Pre-resolve proxy hostname using CGO-compatible resolver
@@ -707,13 +774,21 @@ func (p *HostPool) dialHTTPProxy(ctx context.Context, proxy *proxyConfig) (net.C
 		return nil, fmt.Errorf("no IP addresses found for proxy host %s", proxy.Host)
 	}
 
+	proxyIPs = filterIPv4(proxyIPs)
+	if len(proxyIPs) == 0 {
+		return nil, fmt.Errorf("no IPv4 addresses found for proxy host %s", proxy.Host)
+	}
+
 	dialer := &net.Dialer{Timeout: p.connectTimeout}
 	transport.SetDialerControl(dialer, &p.preset.TCPFingerprint)
 	if p.localAddr != "" {
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(p.localAddr)}
 	}
-	proxyAddr := net.JoinHostPort(proxyIPs[0], proxy.Port)
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+
+	conn, err := dialAllIPs(ctx, proxy.Host, proxyIPs, proxy.Port,
+		func(dctx context.Context, addr string) (net.Conn, error) {
+			return dialer.DialContext(dctx, "tcp", addr)
+		}, p.connectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 	}
@@ -766,13 +841,21 @@ func (p *HostPool) dialSOCKS5Proxy(ctx context.Context, proxy *proxyConfig) (net
 		return nil, fmt.Errorf("no IP addresses found for proxy host %s", proxy.Host)
 	}
 
+	proxyIPs = filterIPv4(proxyIPs)
+	if len(proxyIPs) == 0 {
+		return nil, fmt.Errorf("no IPv4 addresses found for proxy host %s", proxy.Host)
+	}
+
 	dialer := &net.Dialer{Timeout: p.connectTimeout}
 	transport.SetDialerControl(dialer, &p.preset.TCPFingerprint)
 	if p.localAddr != "" {
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(p.localAddr)}
 	}
-	proxyAddr := net.JoinHostPort(proxyIPs[0], proxy.Port)
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+
+	conn, err := dialAllIPs(ctx, proxy.Host, proxyIPs, proxy.Port,
+		func(dctx context.Context, addr string) (net.Conn, error) {
+			return dialer.DialContext(dctx, "tcp", addr)
+		}, p.connectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to SOCKS5 proxy: %w", err)
 	}
