@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sardanioss/httpcloak/fingerprint"
 )
 
 // healthyListener returns a TCP listener bound to 127.0.0.1 on a random port.
@@ -56,6 +58,22 @@ func netDial(ctx context.Context, addr string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", addr)
 }
 
+// makeTestPool returns a minimal HostPool for use in dialHTTPProxy /
+// dialSOCKS5Proxy tests. The preset uses a zero-value TCPFingerprint so no
+// OS-specific setsockopt calls change the loopback socket behaviour.
+func makeTestPool(t *testing.T, host, port string) *HostPool {
+	t.Helper()
+	preset := &fingerprint.Preset{
+		TCPFingerprint: fingerprint.TCPFingerprint{},
+	}
+	return &HostPool{
+		host:           host,
+		port:           port,
+		preset:         preset,
+		connectTimeout: 10 * time.Second,
+	}
+}
+
 // (a) First IP dead, second healthy -> conn from second.
 func TestDialAllIPs_FirstDeadSecondHealthy(t *testing.T) {
 	deadHost, _ := deadAddr(t)
@@ -91,15 +109,24 @@ func TestDialAllIPs_FirstDeadSecondHealthy(t *testing.T) {
 	}
 }
 
-// (b) All unreachable -> wrapped error; total time bounded under connectTimeout.
+// (b) All unreachable -> wrapped error; both addresses actually attempted.
+//
+// Uses a counting dialer shim so the test proves dialAllIPs tried every IP,
+// not just that it formatted the error with the right count.
 func TestDialAllIPs_AllUnreachable(t *testing.T) {
-	host1, port := deadAddr(t)
-	host2, _ := deadAddr(t)
-	ips := []string{host1, host2}
+	var mu sync.Mutex
+	var attempted []string
+	countingFail := func(_ context.Context, addr string) (net.Conn, error) {
+		mu.Lock()
+		attempted = append(attempted, addr)
+		mu.Unlock()
+		return nil, fmt.Errorf("forced failure for %s", addr)
+	}
 
+	ips := []string{"192.0.2.1", "192.0.2.2"} // TEST-NET-1, RFC 5737, never routable
 	start := time.Now()
-	_, err := dialAllIPs(context.Background(), "test.example.com", ips, port,
-		netDial, 30*time.Second)
+	_, err := dialAllIPs(context.Background(), "test.example.com", ips, "9999",
+		countingFail, 10*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -108,10 +135,18 @@ func TestDialAllIPs_AllUnreachable(t *testing.T) {
 	if !strings.Contains(err.Error(), "all 2 proxy IPs failed") {
 		t.Fatalf("expected error to mention 'all 2 proxy IPs failed', got: %v", err)
 	}
-	// Both IPs are loopback closed-ports -> ECONNREFUSED is immediate. Even
-	// with the 2s per-IP floor, we should comfortably finish well under 25s.
-	if elapsed >= 25*time.Second {
-		t.Fatalf("dialAllIPs took %v, expected < 25s", elapsed)
+	mu.Lock()
+	gotAttempted := append([]string(nil), attempted...)
+	mu.Unlock()
+	if len(gotAttempted) != 2 {
+		t.Fatalf("expected both IPs attempted, got %d attempts: %v", len(gotAttempted), gotAttempted)
+	}
+	if gotAttempted[0] != "192.0.2.1:9999" || gotAttempted[1] != "192.0.2.2:9999" {
+		t.Fatalf("unexpected attempt order: %v", gotAttempted)
+	}
+	// Counting dialer returns immediately, so elapsed must be well under 10s.
+	if elapsed >= 9*time.Second {
+		t.Fatalf("dialAllIPs took %v, expected < 9s", elapsed)
 	}
 }
 
@@ -141,7 +176,11 @@ func (f *fakeHTTPProxy) serve() {
 			return
 		}
 		atomic.AddInt32(&f.accepts, 1)
+		// Track each connection goroutine in the WaitGroup so close() waits for
+		// all in-flight writes before returning, preventing race-detector hits.
+		f.wg.Add(1)
 		go func(c net.Conn) {
+			defer f.wg.Done()
 			defer c.Close()
 			r := bufio.NewReader(c)
 			for {
@@ -167,33 +206,42 @@ func (f *fakeHTTPProxy) addr() (string, string) {
 	return splitHostPort(f.listener.Addr())
 }
 
-// (c) Handshake error from first IP propagates; second IP not tried.
+// (c) dialAllIPs returns on the first successful TCP connection — it does not
+// loop past IP[0] once a conn is established.
 //
-// Exercises the dial-then-handshake-once contract directly: dialAllIPs returns
-// the first successful TCP conn, the handshake runs on that conn, and a 407
-// must propagate without re-dialing the second IP. Mirrors the refactored
-// dialHTTPProxy body. We do not invoke dialHTTPProxy itself because it
-// resolves via DNS; constructing the dial sequence here lets us inject
-// arbitrary IPs and assert per-IP accept counts.
-func TestDialHTTPProxy_HandshakeErrorPropagates(t *testing.T) {
+// This test verifies the TCP-layer stop-at-first-success property of dialAllIPs
+// directly. The CONNECT-level no-retry property of dialHTTPProxy is verified
+// separately in TestDialHTTPProxy_CONNECT407ReturnsError below.
+func TestDialAllIPs_StopsAtFirstTCPSuccess(t *testing.T) {
 	proxyA := newFakeHTTPProxy(t, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
 	defer proxyA.close()
 	proxyB := newFakeHTTPProxy(t, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	defer proxyB.close()
 
 	_, portA := proxyA.addr()
+	_, portB := proxyB.addr()
 
-	// Both proxies bind 127.0.0.1 on different ports. dialAllIPs accepts a
-	// single port, so route both attempts through portA. If the loop ever
-	// "fell through" to a second IP it would re-hit proxy A, not B. Asserting
-	// proxyB.accepts == 0 below proves no cross-IP retry happened on the
-	// handshake error.
-	ips := []string{"127.0.0.1", "127.0.0.1"}
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	conn, err := dialAllIPs(context.Background(), "test.example.com", ips, portA,
-		func(ctx context.Context, addr string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", addr)
-		}, 30*time.Second)
+	// IP[0] -> portA (succeeds at TCP, returns 407 at CONNECT).
+	// IP[1] -> portB (different port). dialAllIPs stops at IP[0] because that
+	// dial succeeded; portB should receive zero connections.
+	// We use a custom dialer that routes each IP to its own port so each IP
+	// truly targets a distinct server.
+	portMap := map[string]string{
+		"127.0.0.1": portA,
+		"127.0.0.2": portB,
+	}
+	routingDial := func(ctx context.Context, addr string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(addr)
+		targetPort, ok := portMap[host]
+		if !ok {
+			return nil, fmt.Errorf("no route for %s", host)
+		}
+		return netDial(ctx, net.JoinHostPort("127.0.0.1", targetPort))
+	}
+
+	ips := []string{"127.0.0.1", "127.0.0.2"}
+	conn, err := dialAllIPs(context.Background(), "test.example.com", ips, "ignored",
+		routingDial, 30*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected dial error: %v", err)
 	}
@@ -208,9 +256,8 @@ func TestDialHTTPProxy_HandshakeErrorPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read CONNECT response: %v", err)
 	}
-	resp := string(buf[:n])
-	if !strings.Contains(resp, "407") {
-		t.Fatalf("expected 407 from proxy A, got: %q", resp)
+	if !strings.Contains(string(buf[:n]), "407") {
+		t.Fatalf("expected 407 from proxy A, got: %q", string(buf[:n]))
 	}
 
 	if got := atomic.LoadInt32(&proxyB.accepts); got != 0 {
@@ -221,7 +268,38 @@ func TestDialHTTPProxy_HandshakeErrorPropagates(t *testing.T) {
 	}
 }
 
-// (d) With 10 IPs and a 30s budget, perAddr is floored at 2s.
+// TestDialHTTPProxy_CONNECT407ReturnsError verifies that dialHTTPProxy
+// propagates a 407 response from the proxy as an error without retrying.
+// This exercises the full dialHTTPProxy code path including the CONNECT
+// handshake, unlike TestDialAllIPs_StopsAtFirstTCPSuccess which operates
+// one level below.
+func TestDialHTTPProxy_CONNECT407ReturnsError(t *testing.T) {
+	proxyA := newFakeHTTPProxy(t, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
+	defer proxyA.close()
+
+	_, portA := proxyA.addr()
+
+	pool := makeTestPool(t, "target.example.com", "443")
+	proxy := &proxyConfig{
+		Host: "127.0.0.1",
+		Port: portA,
+	}
+
+	_, err := pool.dialHTTPProxy(context.Background(), proxy)
+	if err == nil {
+		t.Fatal("expected error from 407 proxy, got nil")
+	}
+	if !strings.Contains(err.Error(), "407") {
+		t.Fatalf("expected error to mention 407, got: %v", err)
+	}
+	// Exactly one connection should have been accepted; no retry loop.
+	if got := atomic.LoadInt32(&proxyA.accepts); got != 1 {
+		t.Fatalf("expected exactly 1 accept (no retry), got %d", got)
+	}
+}
+
+// (d) With 10 IPs and a 30s budget, perAddr uses even split (3s); floor kicks
+// in at 20 IPs (1.5s -> 2s); single IP receives the full timeout (no cap).
 func TestDialAllIPs_PerIPFloor(t *testing.T) {
 	if got := perIPTimeout(30*time.Second, 10); got != 3*time.Second {
 		t.Fatalf("perIPTimeout(30s,10) = %v, want 3s", got)
@@ -229,8 +307,9 @@ func TestDialAllIPs_PerIPFloor(t *testing.T) {
 	if got := perIPTimeout(30*time.Second, 20); got != 2*time.Second {
 		t.Fatalf("perIPTimeout(30s,20) = %v, want 2s (floor)", got)
 	}
-	if got := perIPTimeout(30*time.Second, 1); got != 10*time.Second {
-		t.Fatalf("perIPTimeout(30s,1) = %v, want 10s (cap)", got)
+	// Single-IP: full timeout preserved so existing connect behaviour is unchanged.
+	if got := perIPTimeout(30*time.Second, 1); got != 30*time.Second {
+		t.Fatalf("perIPTimeout(30s,1) = %v, want 30s (single-IP full timeout)", got)
 	}
 	if got := perIPTimeout(30*time.Second, 0); got != 30*time.Second {
 		t.Fatalf("perIPTimeout(30s,0) = %v, want 30s", got)
@@ -285,4 +364,59 @@ func TestDialAllIPs_EmptyIPs(t *testing.T) {
 	if errors.Is(err, nil) && strings.Contains(err.Error(), "all 0") {
 		t.Fatalf("unexpected error shape: %v", err)
 	}
+}
+
+// TestDialSOCKS5Proxy_NoAcceptableAuthMethod verifies that dialSOCKS5Proxy
+// propagates a SOCKS5 0xFF "no acceptable methods" response as an error
+// without retrying. This covers the SOCKS5 auth-failure no-retry property
+// that is the SOCKS5 analogue of the HTTP CONNECT 407 case.
+func TestDialSOCKS5Proxy_NoAcceptableAuthMethod(t *testing.T) {
+	l := healthyListener(t)
+	defer l.Close()
+
+	var accepts int32
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			atomic.AddInt32(&accepts, 1)
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				defer c.Close()
+				// Drain client greeting bytes.
+				buf := make([]byte, 16)
+				c.Read(buf) //nolint:errcheck
+				// Respond: no acceptable auth methods.
+				c.Write([]byte{0x05, 0xFF}) //nolint:errcheck
+			}(conn)
+		}
+	}()
+
+	_, portL := splitHostPort(l.Addr())
+	pool := makeTestPool(t, "target.example.com", "443")
+	proxy := &proxyConfig{
+		Host: "127.0.0.1",
+		Port: portL,
+	}
+
+	_, err := pool.dialSOCKS5Proxy(context.Background(), proxy)
+	if err == nil {
+		t.Fatal("expected error from SOCKS5 0xFF, got nil")
+	}
+	if !strings.Contains(err.Error(), "no acceptable auth methods") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Exactly one connection — no cross-IP retry on auth failure.
+	if got := atomic.LoadInt32(&accepts); got != 1 {
+		t.Fatalf("expected 1 accept (no retry), got %d", got)
+	}
+
+	_ = l.Close()
+	wg.Wait()
 }

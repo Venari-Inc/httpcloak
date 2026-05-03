@@ -710,9 +710,14 @@ func filterIPv4(ips []string) []string {
 
 // perIPTimeout computes the per-attempt timeout for a multi-IP dial.
 // Splits totalTimeout evenly across ips, capped at 10s and floored at 2s.
+// Single-IP callers get the full totalTimeout (no cap) so existing connect
+// behaviour is preserved for hosts with one A record.
 // Mirrors the canonical pattern in transport/http2_transport.go:373-374.
 func perIPTimeout(totalTimeout time.Duration, numIPs int) time.Duration {
 	if numIPs <= 0 {
+		return totalTimeout
+	}
+	if numIPs == 1 {
 		return totalTimeout
 	}
 	per := totalTimeout / time.Duration(numIPs)
@@ -779,7 +784,10 @@ func (p *HostPool) dialHTTPProxy(ctx context.Context, proxy *proxyConfig) (net.C
 		return nil, fmt.Errorf("no IPv4 addresses found for proxy host %s", proxy.Host)
 	}
 
-	dialer := &net.Dialer{Timeout: p.connectTimeout}
+	// No Timeout on the dialer: per-IP context deadlines from dialAllIPs govern
+	// each attempt. Setting Timeout here would cause min(Timeout, context) to
+	// apply, defeating the per-IP budget when the floor raises it above totalTimeout.
+	dialer := &net.Dialer{}
 	transport.SetDialerControl(dialer, &p.preset.TCPFingerprint)
 	if p.localAddr != "" {
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(p.localAddr)}
@@ -846,7 +854,9 @@ func (p *HostPool) dialSOCKS5Proxy(ctx context.Context, proxy *proxyConfig) (net
 		return nil, fmt.Errorf("no IPv4 addresses found for proxy host %s", proxy.Host)
 	}
 
-	dialer := &net.Dialer{Timeout: p.connectTimeout}
+	// No Timeout on the dialer: per-IP context deadlines from dialAllIPs govern
+	// each attempt. See dialHTTPProxy for the same rationale.
+	dialer := &net.Dialer{}
 	transport.SetDialerControl(dialer, &p.preset.TCPFingerprint)
 	if p.localAddr != "" {
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(p.localAddr)}
