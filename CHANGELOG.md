@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`WithLocalAddrIP(net.IP)` ergonomic alias** — Drop-in `net.IP`-typed sibling for the existing `WithLocalAddress(string)` option. Lets callers who already hold a parsed IP (rotating from a precomputed pool, returned by an upstream allocator) skip the `String()` round-trip. Same internal storage as the string form, so mixing the two is safe; nil `net.IP` is a no-op so option chains built conditionally don't accidentally clobber a previously-set address.
+
+### Fixed
+
+- **`client.Client.DoStream` now applies and stores cookies via the jar** — The lower-level Go `client.Client` had cookie-jar parity on `Do()` since the jar shipped, but `DoStream` skipped both halves: it didn't add `Cookie:` from the jar to the request, and it didn't fold `Set-Cookie:` from the streamed response back into the jar. Sessions that authenticated via `Do()` and then issued a streaming request silently lost their auth state on the wire, and any cookies set by streamed responses vanished. Both halves now mirror the existing `Do()` paths in `client.go`. Session-level (`session.RequestStream`) and all language bindings already had parity, so this only affected Go users on the lower-level `client` API.
+- **IP_FREEBIND is actually applied now when `WithLocalAddress` is set** — The doc comment has claimed `Works with IP_FREEBIND on Linux` since v1.5.x, but the codebase never set the sockopt. Operators relying on the documented behaviour to bind to a routed-but-not-locally-configured IPv6 address (the documented IPv6-prefix-rotation use case) hit `EADDRNOTAVAIL` unless they had `net.ipv4.ip_nonlocal_bind=1` set globally or ran with `CAP_NET_ADMIN`. Fixed: a Linux-only `applyFreebind` helper now sets `IP_FREEBIND` (15) and `IPV6_FREEBIND` (78) on every TCP dial socket and UDP listen socket created when `LocalAddress` is non-empty. Wired into all three transports (H1/H2 direct + proxy paths, H3/QUIC UDP listen) and the SOCKS5 dialer. Non-Linux platforms get a no-op stub. Conditional gate: freebind is only applied when `LocalAddress` is set, so default callers see zero behaviour change.
+
 ## [1.6.5] - 2026-04-30
 
 ### Breaking Changes
