@@ -28,14 +28,13 @@ import (
 	"fmt"
 
 	"github.com/sardanioss/httpcloak"
-	"github.com/sardanioss/httpcloak/fingerprint"
 )
 
 func main() {
-	s, _ := httpcloak.NewSession(fingerprint.Chrome148())
+	s := httpcloak.NewSession("chrome-latest")
 	defer s.Close()
 
-	resp, _ := s.Get(context.Background(), "https://example.com/", nil)
+	resp, _ := s.Get(context.Background(), "https://example.com/")
 	fmt.Println(resp.StatusCode)
 }
 ```
