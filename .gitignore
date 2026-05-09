@@ -42,6 +42,8 @@ temp/
 tests/
 # Internal tests (not published)
 internal_tests/
+# Root-level _test.go files stay local (subdir tests still ship)
+/*_test.go
 
 # Local workspace config (points at machine-local fork paths)
 go.work
