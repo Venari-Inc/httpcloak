@@ -150,7 +150,7 @@ A lower-level client surface that predates the unified root API. New code should
 - `streaming/`: streaming-body request helpers.
 - `extensions/`: uTLS extension shims.
 
-The same caveat applies to `proxy/socks5_*.go` (`SOCKS5Dialer`, `SOCKS5UDPConn` and friends) and the lower-level transport entry points listed in [Observability](../connection-lifecycle/observability). They show up in GoDoc because Go has no friend-package mechanism, but treat them as internal unless you're explicitly extending the lib's transport stack.
+The same caveat applies to `proxy/socks5_*.go` (`SOCKS5Dialer`, `SOCKS5UDPConn` and friends), `proxy/masque.go` (`MASQUEConn` and the connection-establishment helpers), and the lower-level transport entry points listed in [Observability](../connection-lifecycle/observability). They show up in GoDoc because Go has no friend-package mechanism, but treat them as internal unless you're explicitly extending the lib's transport stack.
 
 
 

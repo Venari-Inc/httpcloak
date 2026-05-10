@@ -97,19 +97,20 @@ for _, h := range []string{"a.example.com", "b.example.com"} {
 
 ## ECH DNS server overrides
 
-ECH discovery (HTTPS RR lookup) is a separate code path with its own cache and its own resolver. By default the lib uses the system resolver. To send ECH lookups to a specific DoH or DoT endpoint (for ECH on networks where the system resolver doesn't return HTTPS RR):
+ECH discovery (HTTPS RR lookup) is a separate code path with its own cache and its own resolver. By default the lib queries `8.8.8.8:53`, `1.1.1.1:53`, and `9.9.9.9:53` in that order on UDP, with a 500ms per-server timeout (ECH is treated as best-effort, so a slow resolver doesn't stall the dial). To redirect those queries to a specific resolver (for example a corporate DNS that DOES return HTTPS RR, or a local DoH proxy):
 
 ```go
 import "github.com/sardanioss/httpcloak/dns"
 
-dns.SetECHDNSServers([]string{"https://1.1.1.1/dns-query"})
+dns.SetECHDNSServers([]string{"10.0.0.53:53"})
 servers := dns.GetECHDNSServers()
+dns.SetECHDNSServers(nil) // reset to the default 8.8.8.8 / 1.1.1.1 / 9.9.9.9 trio
 ```
 
-Both functions are package-level and process-wide, not per-cache. They affect every ECH lookup the binary makes from the moment they're set. See [ECH](../advanced-tls/ech) for the higher-level ECH workflow.
+Both functions are package-level and process-wide, not per-cache. They affect every ECH lookup the binary makes from the moment they're set. The 500ms timeout is hard-coded; an ECH lookup that doesn't come back in 500ms is treated as "no ECH available" and the dial proceeds without it. See [ECH](../advanced-tls/ech) for the higher-level ECH workflow.
 
 ## Bindings
 
-The Python and Node bindings expose `set_ech_dns_servers` / `get_ech_dns_servers` (Python: `httpcloak.set_ech_dns_servers([...])`). The .NET binding has the raw P/Invoke entry (`Native.SetEchDnsServers`) but no managed wrapper today.
+The Python (`httpcloak.set_ech_dns_servers([...])`) and Node (`setEchDnsServers([...])`) bindings expose the override directly. The .NET binding ships a managed wrapper at `HttpCloak.HttpCloakInfo.SetEchDnsServers(string[])` / `GetEchDnsServers()`.
 
 Per-cache controls (TTL, manual `Resolve` / `Invalidate`, stats) are Go-only. The bindings drive the cache implicitly through `Session` and don't surface the `Cache` struct directly. If a binding caller needs explicit cache control, the workaround is a Go-side helper exposed through `LocalProxy` or the bindings' raw cgo entry points.

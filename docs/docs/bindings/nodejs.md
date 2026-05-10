@@ -103,6 +103,11 @@ new Session(options?: SessionOptions);
   ja3?: string;
   akamai?: string;
   extraFp?: Record<string, any>;
+  tcpTtl?: number;
+  tcpMss?: number;
+  tcpWindowSize?: number;
+  tcpWindowScale?: number;
+  tcpDf?: boolean;
 }
 ```
 
@@ -195,7 +200,7 @@ session.warmup(url, options?): void;
 session.fork(n?: number): Session[];
 ```
 
-`refresh` keeps cookies and TLS tickets while dropping connections. The optional `switchProtocol` argument forces the next request onto the named protocol and persists for future `refresh()` calls until cleared (works at runtime even though the published `.d.ts` declares `refresh(): void`; cast to `any` from TS until the typings catch up). `warmup` simulates a real page load. `fork` clones cookies and TLS state into N sibling sessions, each with its own connection pool.
+`refresh` keeps cookies and TLS tickets while dropping connections. The optional `switchProtocol` argument forces the next request onto the named protocol and persists for future `refresh()` calls. `warmup` simulates a real page load. `fork` clones cookies and TLS state into N sibling sessions, each with its own connection pool.
 
 ### Persistence
 
@@ -211,17 +216,17 @@ Session.unmarshal(data: string): Session;  // static
 ### Cookies
 
 ```ts
-session.cookies: Record<string, string>;        // deprecated flat shape
-session.getCookies(): Record<string, string>;    // deprecated
-session.getCookiesDetailed(): Cookie[];
-session.getCookie(name): string | null;          // deprecated
-session.getCookieDetailed(name): Cookie | null;
+session.cookies: Cookie[];                       // current cookie list, full metadata
+session.getCookies(): Cookie[];                  // same as .cookies
+session.getCookiesDetailed(): Cookie[];          // alias kept for migration
+session.getCookie(name): Cookie | null;          // by name, full metadata
+session.getCookieDetailed(name): Cookie | null;  // alias of getCookie
 session.setCookie(name, value, options?): void;
 session.deleteCookie(name, domain?): void;
 session.clearCookies(): void;
 ```
 
-The flat `Record<string, string>` shape will get replaced with `Cookie[]` in a future major. `getCookiesDetailed` / `getCookieDetailed` already return the new shape.
+The flat `Record<string, string>` shape was removed in v1.6.5; both `getCookies()` and the `cookies` getter now return `Cookie[]` with full metadata. `getCookiesDetailed` / `getCookieDetailed` are kept as aliases so callers that migrated early during the deprecation window keep compiling.
 
 ### Proxies
 

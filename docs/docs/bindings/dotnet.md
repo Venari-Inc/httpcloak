@@ -144,13 +144,15 @@ StreamResponse RequestStream(string method, string url, string? body = null, ...
 ### Fast path
 
 ```csharp
-FastResponse GetFast(string url, ...);
-FastResponse PostFast(string url, byte[]? body = null, ...);
-FastResponse RequestFast(string method, string url, byte[]? body = null, ...);
-FastResponse PutFast(string url, byte[]? body = null, ...);
-FastResponse DeleteFast(string url, ...);
-FastResponse PatchFast(string url, byte[]? body = null, ...);
+FastResponse GetFast(string url, Dictionary<string, string>? headers = null);
+FastResponse PostFast(string url, byte[]? body = null, Dictionary<string, string>? headers = null, string? contentType = null);
+FastResponse RequestFast(string method, string url, byte[]? body = null, Dictionary<string, string>? headers = null, string? contentType = null, int? timeout = null);
+FastResponse PutFast(string url, byte[]? body = null, Dictionary<string, string>? headers = null, string? contentType = null, int? timeout = null);
+FastResponse DeleteFast(string url, Dictionary<string, string>? headers = null, int? timeout = null);
+FastResponse PatchFast(string url, byte[]? body = null, Dictionary<string, string>? headers = null, string? contentType = null, int? timeout = null);
 ```
+
+`GetFast` and `PostFast` don't accept a `timeout` parameter; they use the session-level default. `RequestFast`, `PutFast`, `DeleteFast`, and `PatchFast` do take an optional per-call `timeout` (seconds).
 
 `FastResponse` skips a few allocations and exposes `Content` as a `byte[]` that's already been copied out of the pooled native buffer at the C boundary. There's no `Release()` method and no `IDisposable` to pair with `using`; the `byte[]` is GC-managed like any other .NET array. The class is a value-shaped record you read and let the garbage collector recycle.
 
@@ -250,7 +252,7 @@ public sealed class Response
 }
 ```
 
-`Content` holds the raw response bytes; `Text` is the decoded string. `Elapsed` is a `TimeSpan` (use `.TotalMilliseconds` if you need a `double` in ms). `Json<T>()` parses `Text` using `System.Text.Json` with relaxed escaping and returns `T?` (nullable; null on parse failure or empty body). `RaiseForStatus()` throws `HttpCloakException` on `>= 400`. `FastResponse` exposes the same property surface plus a smaller fast-path constructor and is documented as a separate type in [Reference: FastResponse](#fast-path).
+`Content` holds the raw response bytes; `Text` is the decoded string. `Elapsed` is a `TimeSpan` (use `.TotalMilliseconds` if you need a `double` in ms). `Json<T>()` parses `Text` with `System.Text.Json` default options and throws `JsonException` on malformed input or empty body; wrap it in a `try/catch` if you want to treat parse failures as `null` instead of an exception. `RaiseForStatus()` throws `HttpCloakException` on `>= 400`. `FastResponse` exposes the same property surface plus a smaller fast-path constructor and is documented as a separate type in [Reference: FastResponse](#fast-path).
 
 ## Conventions
 
@@ -351,8 +353,10 @@ HttpCloak.FastResponse
 HttpCloak.HttpCloakHandler  // DelegatingHandler for HttpClient integration
 HttpCloak.HttpCloakInfo     // version, AvailablePresets, SetEchDnsServers, GetEchDnsServers
 HttpCloak.CustomPresets     // Describe / LoadFromJson / LoadFromFile / Unregister
-HttpCloak.Presets           // string constants (Presets.CHROME_148, etc.)
+HttpCloak.Presets           // PascalCase string constants (Presets.Chrome146, Presets.Firefox133, ...)
 ```
+
+The `Presets` static class lags the registry by a release or two; the constants currently top out at `Presets.Chrome146` and the family of older PascalCase names. Newer presets land as plain string literals first (`new Session(preset: "chrome-148-windows")`) and get a typed constant in a follow-up. `HttpCloakInfo.AvailablePresets()` returns a `Dictionary<string, PresetInfo>` keyed by the canonical preset name (use `.ContainsKey("chrome-148")` to probe).
 
 `SessionCacheBackend` is Python and Node only; the .NET binding doesn't ship a managed wrapper today. The C entry points exist in `libhttpcloak`, so a future binding update can fold it in. Until then, the in-memory per-session ticket cache works as expected and only the cross-process distributed-cache use case isn't reachable from .NET.
 

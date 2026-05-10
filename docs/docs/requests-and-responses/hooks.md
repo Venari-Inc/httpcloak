@@ -49,7 +49,7 @@ Typical uses:
 
 Hooks fire in the order you registered them. Three PreRequest hooks run 1, 2, 3 on every request. PreRequest hooks short-circuit on the first error: if hook 2 returns an error, hook 3 never fires and the request never goes out.
 
-PostResponse runs the same order with the same short-circuit behaviour. The first hook returning an error stops the chain and surfaces the error back to the request caller.
+PostResponse runs the same order with one important difference: the chain still short-circuits on the first hook that returns an error, but the lib swallows the eventual error and returns the response to the caller anyway. PostResponse hooks are observability, not control flow, so a hook erroring out stops the rest of the chain from seeing the response but doesn't propagate the error to the request caller.
 
 ## Wiping hooks
 

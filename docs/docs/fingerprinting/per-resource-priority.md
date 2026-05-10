@@ -205,7 +205,7 @@ To turn per-resource priority off entirely on a preset (every request gets the s
 | Preset family | RFC 7540 PRIORITY frame | RFC 9218 priority header | Default table |
 |---|---|---|---|
 | Chrome desktop 147+ (incl. 148) | yes | yes | 14-dest table above |
-| Chrome desktop 146 and below | yes (static weight 256, exclusive) | no | n/a |
+| Chrome desktop 141 / 133 (legacy presets) | yes (static weight 256, exclusive) | no | n/a |
 | Chrome Android 148 | yes | yes | 14-dest table above |
 | Firefox 148 | yes | yes (different urgencies, currently uses Chrome table, capture pending) | inherits Chrome table |
 | Safari 18 desktop | no | yes | inherits Chrome table for header values; never emits H2 PRIORITY frame |
@@ -217,4 +217,4 @@ A custom preset inherits the 14-dest table for free unless you override it. To o
 
 A constant H2 stream weight on every request is one of the easiest H2 fingerprint giveaways, and Cloudflare and Akamai both check it. The priority header check is newer, since RFC 9218 only stabilized in 2022, but it's becoming standard at major edge providers. httpcloak handles both as long as your preset is a modern one (Chrome 147+, Firefox 148+, Safari 18+).
 
-Edge-vendor challenges that don't reproduce in a real browser session usually trace back to this layer. Capture the wire-level H2 frames from both, diff the priority weights, and check whether your preset's `priority_table` matches. Chrome 146 and below ship a constant `weight=256, exclusive=true` on every request. That's our oldest behaviour, and modern Cloudflare flags it. For new code, stick with `chrome-latest` or any 147+.
+Edge-vendor challenges that don't reproduce in a real browser session usually trace back to this layer. Capture the wire-level H2 frames from both, diff the priority weights, and check whether your preset's `priority_table` matches. The legacy `chrome-141` and `chrome-133` presets still ship a constant `weight=256, exclusive=true` on every request because they predate the per-resource priority work; modern Cloudflare flags that. The 143-148 family inherits the per-`Sec-Fetch-Dest` table after issue #56 (v1.6.5 retroactively gave chrome-141-through-chrome-147 the inherited table; v1.6.6 keeps that). For new code, stick with `chrome-latest` or any 143+ explicit version.

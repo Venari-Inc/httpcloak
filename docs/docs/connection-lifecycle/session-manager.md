@@ -7,10 +7,13 @@ sidebar_position: 7
 
 `session.Manager` is an in-process registry for many sessions at once. One Go binary running a worker pool, a multi-tenant scraper that needs N persistent identities, or a service that exposes "give me a session by ID" semantics over an internal API. The Manager handles ID generation, idle eviction, and clean shutdown without you having to maintain a `map[string]*Session` and a janitor goroutine yourself.
 
-It lives in the `session` subpackage. There's no top-level `httpcloak.Manager` wrapper today, so import the subpackage directly:
+The top-level package re-exports it. `httpcloak.Manager` is a type alias for `session.Manager`, and `httpcloak.NewManager()` is the constructor. The same value lives at `session.Manager` for callers who already import the subpackage:
 
 ```go
-import "github.com/sardanioss/httpcloak/session"
+import "github.com/sardanioss/httpcloak"
+
+m := httpcloak.NewManager()
+defer m.Shutdown()
 ```
 
 ## When to reach for it
@@ -26,7 +29,7 @@ The `LocalProxy` chapter ([Local Proxy Server](/recipes/local-proxy-server)) use
 ## Construction and defaults
 
 ```go
-m := session.NewManager()
+m := httpcloak.NewManager()
 ```
 
 The defaults are:
@@ -65,12 +68,12 @@ import (
     "sync"
     "time"
 
+    "github.com/sardanioss/httpcloak"
     "github.com/sardanioss/httpcloak/protocol"
-    "github.com/sardanioss/httpcloak/session"
 )
 
 func main() {
-    m := session.NewManager()
+    m := httpcloak.NewManager()
     m.SetMaxSessions(50)
     m.SetSessionTimeout(15 * time.Minute)
     defer m.Shutdown()

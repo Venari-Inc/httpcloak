@@ -246,7 +246,7 @@ type HTTPError struct {
 (*HTTPError).IsRetryable()  bool    // 408, 425, 429, 500, 502, 503, 504
 ```
 
-The default response handler does NOT raise on 4xx/5xx. You opt in with `RaiseForStatus()` per response, or by wiring a hook that emits `HTTPError` from a status filter. See [Hooks](./hooks) for the per-status pattern.
+The default response handler does NOT raise on 4xx/5xx. Go callers check `resp.StatusCode` directly and construct an `*HTTPError` with `transport.NewHTTPError` when they want a typed wrapper. The bindings ship a `RaiseForStatus()` / `raise_for_status()` shortcut on the response object, but Go has no equivalent on `*Response`. See [Hooks](./hooks) for a hook-driven pattern that emits `HTTPError` from a status filter.
 
 ## Retry guidance
 

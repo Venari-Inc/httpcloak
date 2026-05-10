@@ -36,7 +36,7 @@ The fields:
 | `ID` | `string` | The session's internal UUID. Stable for the life of the session. Useful as a log correlation key. |
 | `Preset` | `string` | Preset name the session was built from (`chrome-latest`, `firefox-148`, etc.). |
 | `CreatedAt` | `time.Time` | Wall-clock time when `NewSession` returned. |
-| `LastUsed` | `time.Time` | Wall-clock time of the last request issue or explicit `Touch()`. Updated on `Get`, `Post`, `Do`, `DoStream` and `Warmup` exits. |
+| `LastUsed` | `time.Time` | Wall-clock time of the last request *start* (or explicit `Touch()`). Set at the top of `Do` / `DoStream` / `Warmup`, not on exit, so a long-running streaming request keeps `IdleTime()` near zero for its whole duration rather than only after the body finishes. |
 | `RequestCount` | `int64` | Total request count since creation. Counts every request that left the session, including failed ones. |
 | `Active` | `bool` | False after `Close()` returns. Same value `IsActive()` reports. |
 | `CookieCount` | `int` | Number of cookies in the jar at snapshot time. |
@@ -53,7 +53,7 @@ These three methods cover the idle-management lifecycle: read how long a session
 
 ### IdleTime
 
-`IdleTime()` returns `time.Since(LastUsed)`. The session updates `LastUsed` on every successful or failed request exit, so a fresh `IdleTime()` reading reflects the actual wall-clock gap since the session last did work. The standard pattern is a janitor goroutine that wakes every 60 seconds, walks a session pool, and refreshes or closes anything that's been quiet for too long. Go-only.
+`IdleTime()` returns `time.Since(LastUsed)`. The session updates `LastUsed` at the start of every request (and on `Touch()`), not on exit, so during a long-running streaming request `IdleTime()` reads as small even while the body is still draining. The standard pattern is a janitor goroutine that wakes every 60 seconds, walks a session pool, and refreshes or closes anything that's been quiet for too long. Go-only.
 
 ```go
 // Janitor: every 60s, refresh sessions idle > 5min, close those idle > 30min.

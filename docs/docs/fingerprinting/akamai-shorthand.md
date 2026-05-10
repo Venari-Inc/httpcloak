@@ -213,12 +213,15 @@ if err != nil {
 // pseudoOrder is the resolved [":method", ":authority", ":scheme", ":path"]
 ```
 
-For richer introspection (which fields were present in the input vs which fields fell back to defaults), `ParseAkamaiDetailed` returns an `AkamaiPresence` struct alongside the settings. That's the right call when you need to reason about partial overrides:
+For richer introspection (which fields were present in the input vs which fields fell back to defaults), `ParseAkamaiDetailed` returns an `*AkamaiPresence` struct. That's the right call when you need to reason about partial overrides:
 
 ```go
-presence, err := fingerprint.ParseAkamaiDetailed("1:65536|||")
-// presence.HasSettings == true, but presence.HasWindowUpdate / HasPriority /
-// HasPseudoOrder == false. The preset's defaults stay in place for the empty fields.
+pres, err := fingerprint.ParseAkamaiDetailed("1:65536|0|0|m,a,s,p")
+// pres.Settings:        *HTTP2Settings with the parsed values
+// pres.PseudoOrder:     []string with the resolved ":method" / ":authority" / ... slot order
+// pres.SeenSettings:    map[uint16]bool of SETTINGS IDs that appeared in the string
+// pres.HasWindowUpdate: true if the WINDOW_UPDATE field carried a value
+// pres.HasStreamWeight: true if the PRIORITY field had a non-zero weight
 ```
 
-Both parsers reject malformed input rather than silently filling defaults: a string with the wrong field count, an empty SETTINGS value, or a non-numeric SETTINGS pair returns an error. Validate user-supplied akamai strings through one of these before passing them into a preset and you avoid the parse-time crash that the `Akamai` session option would otherwise hit at first request.
+Use `SeenSettings[id]` to tell "the input set SETTING N to a value (possibly zero)" apart from "the input never mentioned SETTING N, so the preset's value is in effect". Both parsers reject malformed input rather than silently filling defaults: a string with the wrong field count, an empty SETTINGS value, or a non-numeric SETTINGS pair returns an error. Validate user-supplied akamai strings through one of these before passing them into a preset and you avoid the parse-time crash that the `Akamai` session option would otherwise hit at first request.

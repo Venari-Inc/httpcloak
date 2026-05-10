@@ -15,7 +15,7 @@ Use streaming for:
 - **Anything chunked.** When the server doesn't know the content length up front.
 
 :::info
-On older builds, `DoStream` didn't update the cookie jar from the response. The fix is queued for the next release (commit `e3acf96`) and will land alongside the IPv6 source-binding hardening. Upgrade once it ships, or extract Set-Cookie headers by hand on builds that predate it.
+On builds older than v1.6.6, the lower-level `client.Client.DoStream` didn't update the cookie jar from the response. The fix shipped in 1.6.6 (commit `e3acf96`); session-level `DoStream` and every binding had jar parity already. On 1.6.6 or newer, `Do` and `DoStream` feed the same jar identically.
 :::
 
 ## The shape
@@ -166,16 +166,16 @@ Closing partway through is fine. The lib reads-and-discards the rest in the back
 
 To know the size up front, fire a `HEAD` request first, read `Content-Length` from the response headers, then `DoStream()` the GET. Most servers send a length on HEAD even when they switch to chunked on GET.
 
-## Cookie jar parity (queued for next release)
+## Cookie jar parity (since 1.6.6)
 
-Once shipped, streaming responses go through the same cookie extraction path as regular ones. `Set-Cookie` headers from the response, including any in-stream redirect the lib resolved before handing you the body, land in the session jar.
+Streaming responses go through the same cookie extraction path as regular ones. `Set-Cookie` headers from the response, including any in-stream redirect the lib resolved before handing you the body, land in the session jar.
 
-Before this fix, streaming bypassed the jar update and you'd silently miss cookies from streamed endpoints. The patch lives at commit [`e3acf96`](../changelog) and is queued for the next tagged release (post-1.6.6); after it ships, `Do` and `DoStream` behave identically.
+Before 1.6.6, the lower-level Go `client.Client.DoStream` skipped jar reads and writes; sessions that authenticated via `Do()` and then issued a streaming request silently lost their auth state on the wire. The session-level `DoStream` and every binding had parity already, so this only affected callers using the `client/` subpackage directly. Fixed in 1.6.6 ([`e3acf96`](../changelog)).
 
-For builds that predate the fix:
+For builds that predate the fix and can't upgrade:
 
 ```go
-// Manual cookie extraction from a streamed response, pre-fix workaround.
+// Manual cookie extraction from a streamed response, pre-1.6.6 workaround.
 for _, sc := range stream.Headers["Set-Cookie"] {
     // parse sc with net/http or store as raw and inject on next request
 }

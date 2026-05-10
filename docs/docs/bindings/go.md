@@ -193,9 +193,30 @@ Override the preset's header order. Pass lowercase names. Empty slice resets to 
 
 ```go
 func (s *Session) SetSessionIdentifier(sessionId string)
+func (s *Session) Stats() session.SessionStats
+func (s *Session) IdleTime() time.Duration
+func (s *Session) IsActive() bool
+func (s *Session) Touch()
+func (s *Session) ClearCache()
+func (s *Session) GetTransport() *transport.Transport
 ```
 
-Tags this session for distributed TLS cache key isolation when running behind a `LocalProxy`. Most callers won't touch this.
+`SetSessionIdentifier` tags this session for distributed TLS cache key isolation when running behind a `LocalProxy`. The other methods are observability and lifecycle helpers covered fully in [Observability](/connection-lifecycle/observability) and [Session Manager](/connection-lifecycle/session-manager).
+
+### Top-level helpers
+
+```go
+func New(preset string, opts ...Option) *Client
+func NewSession(preset string, opts ...SessionOption) *Session
+func NewManager() *Manager                              // session.Manager re-export
+func LoadSession(path string) (*Session, error)
+func UnmarshalSession(data []byte) (*Session, error)
+func ValidateSessionFile(path string) error             // pre-flight load check
+func SetKeyLogWriter(w io.Writer)                       // process-wide TLS keylog sink
+func Presets() []string                                 // all registered preset names
+```
+
+`Manager` is a type alias for `session.Manager` so callers can declare `var m *httpcloak.Manager` without reaching into the subpackage. See [Session Manager](/connection-lifecycle/session-manager) for the full registry surface.
 
 ## Client methods
 

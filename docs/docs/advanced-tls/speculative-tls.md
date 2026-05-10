@@ -179,7 +179,7 @@ transport.MarkProxyNoSpeculative("proxy.example.com:443")
 
 // optionally check before configuring a session
 if transport.IsProxyNoSpeculative("proxy.example.com:443") {
-    // skip WithSessionEnableSpeculativeTLS for this proxy
+    // skip WithEnableSpeculativeTLS for this proxy
 }
 ```
 

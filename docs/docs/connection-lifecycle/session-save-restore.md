@@ -232,6 +232,6 @@ The further apart save and load are, the less the ticket cache buys you. After a
 
 ## Versioning and safety
 
-The save format is versioned. v5 is current; v3 and v4 still load. A newer file opened by an older library returns `session file version N is newer than supported version 5`. The Go-side `session.ValidateSessionFile(path)` (in the `github.com/sardanioss/httpcloak/session` subpackage, not re-exported at top-level `httpcloak.`) is a cheap pre-load sanity check. The Python, Node and .NET bindings don't expose a separate validate call today; load and catch the error if you need a probe.
+The save format is versioned. v5 is current; v3 and v4 still load. A newer file opened by an older library returns `session file version N is newer than supported version 5`. `httpcloak.ValidateSessionFile(path)` is a cheap pre-load sanity check (re-exported from `session.ValidateSessionFile` in the subpackage). The Python, Node and .NET bindings don't expose a separate validate call today; load and catch the error if you need a probe.
 
 Don't load session files from untrusted sources. The saved blob carries the preset config (proxy URL, ECH domain, fingerprint overrides), which gets applied verbatim on load. A malicious file can pivot a session in ways the caller didn't intend. Treat these like config files in your own repo, not user input.

@@ -14,7 +14,7 @@ Four proxy protocols are supported. The right one depends on what your upstream 
 | HTTP CONNECT | `http://`, `https://` | TCP (HTTP/1.1, HTTP/2) | Basic | The classic. Datacenter proxies, corporate egress, anything fronting as a normal HTTP proxy. |
 | SOCKS5 | `socks5://`, `socks5h://` | TCP (HTTP/1.1, HTTP/2) | none, user/pass | Residential providers default to this. BrightData, Smartproxy, Oxylabs, SOAX. |
 | SOCKS5 with UDP ASSOCIATE | `socks5://` (UDP slot) | UDP (HTTP/3 over QUIC) | none, user/pass | Routing H3 through a SOCKS5 server that supports UDP relay. Less common, not every provider does it. |
-| MASQUE (CONNECT-UDP) | `masque://`, `https://` | UDP inside HTTP/3 | Basic | The new kid. Tunnels QUIC inside QUIC. Cloudflare WARP and a few residential providers ship this for H3. |
+| MASQUE (CONNECT-UDP) | `masque://`, `https://` | UDP inside HTTP/3 | Basic | The new kid. Tunnels QUIC inside QUIC. A handful of residential providers (Bright Data, Oxylabs, Smartproxy, SOAX) auto-detect from `https://` URLs; any other provider needs the explicit `masque://` scheme. |
 
 The short version: HTTP CONNECT covers HTTP/1.1 and HTTP/2, SOCKS5 covers the same when your residential provider hands you a SOCKS5 endpoint, and a UDP proxy (SOCKS5 UDP or MASQUE) only enters the picture when you want HTTP/3 to ride through the proxy too.
 
@@ -74,7 +74,7 @@ A rough decision tree:
 - Datacenter or corporate proxy gave you a host:port and HTTP basic auth: HTTP CONNECT.
 - Residential provider gave you a SOCKS5 endpoint: [SOCKS5](./socks5).
 - Same residential provider, you want H3 to also go through the proxy and they advertise UDP support: [SOCKS5 UDP](./socks5-udp).
-- You want H3 traffic specifically tunneled through Cloudflare WARP or a custom MASQUE server: [MASQUE](./masque).
+- You want H3 traffic tunneled through a residential-proxy provider that ships MASQUE, or through a custom MASQUE server: [MASQUE](./masque).
 - You want a single source IP no matter the proxy choice: [Source Address Binding](./source-address-binding).
 
 ## Bindings

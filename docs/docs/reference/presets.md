@@ -77,16 +77,18 @@ The Chrome desktop family. Versions 143 through 146 are Go-defined in `fingerpri
 | `chrome-145-{windows,linux,macos}` | `...Chrome/145.0.0.0...` | matching brand list | Native Go preset, per-platform ClientHello. |
 | `chrome-144-{windows,linux,macos}` | `...Chrome/144.0.0.0...` | matching brand list | Native Go preset, per-platform ClientHello. |
 | `chrome-143-{windows,linux,macos}` | `...Chrome/143.0.0.0...` | matching brand list | Native Go preset, per-platform ClientHello. |
-| `chrome-141` | `...Chrome/141.0.0.0...` | matching brand list | Auto-detects platform. |
-| `chrome-133` | `...Chrome/133.0.0.0...` | matching brand list | Auto-detects platform. |
+| `chrome-141` | `...Chrome/141.0.0.0...` | matching brand list | Legacy preset, no per-OS variants, no QUIC fingerprint (H1/H2 only). |
+| `chrome-133` | `...Chrome/133.0.0.0...` | matching brand list | Legacy preset, no per-OS variants, no QUIC fingerprint (H1/H2 only). |
 
 The unsuffixed `chrome-148` / `chrome-147` / `chrome-146` / `chrome-145` / `chrome-144` / `chrome-143` resolve at runtime to whichever platform-suffixed variant matches the host OS. Pick the suffix when you want consistent results across machines.
 
-All Chrome desktop presets:
+The 143-and-newer Chrome desktop line:
 
-- Speak HTTP/3 via `tls.HelloChrome_<v>_QUIC` plus a PSK variant for resumption.
-- Use the Chrome H2 config (`chromeH2Config`): pseudo-header order `m,a,s,p`, settings order from real Chrome captures, RFC 7540 priorities on `HEADERS`.
+- Speaks HTTP/3 via `tls.HelloChrome_<v>_QUIC` plus a PSK variant for resumption.
+- Uses the Chrome H2 config (`chromeH2Config`): pseudo-header order `m,a,s,p`, settings order from real Chrome captures, RFC 7540 priorities on `HEADERS`.
 - Default Akamai: `1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`.
+
+`chrome-141` and `chrome-133` are kept around for callers pinning a specific older Chrome version, but they ship without a QUIC fingerprint, so a session built on one of them will only negotiate H1 and H2.
 
 ---
 
@@ -166,7 +168,7 @@ Safari macOS:
 | Preset | UA | TLS | Notes |
 |---|---|---|---|
 | `safari-18-ios` | `Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1` | `HelloIOS_18` | H3 via `HelloIOS_18_QUIC`. |
-| `safari-17-ios` | `...iPhone OS 17_0...Version/17.0 Mobile...` | `HelloIOS_17` | Older variant. |
+| `safari-17-ios` | `...iPhone OS 17_0...Version/17.0 Mobile...` | `HelloIOS_17` | Older variant; H1 / H2 only (no proper H3 TLS spec for iOS Safari 17). |
 
 iOS Safari shares the H2 fingerprint with macOS Safari but ships a slightly different TLS extension order. The difference shows up in JA3 and disappears in JA4.
 

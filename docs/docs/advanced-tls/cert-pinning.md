@@ -1,6 +1,6 @@
 ---
 title: Certificate Pinning
-sidebar_position: 5
+sidebar_position: 6
 ---
 
 import Tabs from '@theme/Tabs';
@@ -131,22 +131,21 @@ The shell pipeline below works for one-off captures. For programmatic pin captur
 import "github.com/sardanioss/httpcloak/client"
 
 hash := client.CalculateSPKIHash(cert)            // *x509.Certificate -> base64 SPKI hash
-hashes := client.CalculateChainHashes(chain)      // []*x509.Certificate -> []string
 ```
 
-The hash is SHA-256 of the certificate's `RawSubjectPublicKeyInfo`, base64-encoded with standard padding. That's the same value the openssl pipeline produces, byte for byte.
+The hash is SHA-256 of the certificate's `RawSubjectPublicKeyInfo`, base64-encoded with standard padding. That's the same value the openssl pipeline produces, byte for byte. For a chain, loop and call `CalculateSPKIHash` per cert; the lib doesn't ship a public chain helper today.
 
 Inspecting an active pinner's state is a single call:
 
 ```go
-pins := c.CertPinner().GetPins()        // []client.CertificatePin
+pins := c.CertPinner().GetPins()        // []*client.CertificatePin
 for _, p := range pins {
-    fmt.Printf("host=%s subdomains=%v hash=%s type=%s\n",
+    fmt.Printf("host=%s subdomains=%v hash=%s type=%v\n",
         p.Host, p.IncludeSubdomains, p.Hash, p.Type)
 }
 ```
 
-`CertificatePin` carries `Hash`, `Host`, `IncludeSubdomains`, and `Type` (a `client.PinType` enum, `PinTypeSPKI` today; the type is there so future pin shapes can land without breaking callers).
+`CertificatePin` carries `Hash`, `Host`, `IncludeSubdomains`, and `Type` (a `client.PinType` enum). The two values today are `PinTypeSHA256` (the default; SHA-256 of the SPKI as set by `AddPin` and `PinCertificate`) and `PinTypeCertificate` (reserved for whole-cert pinning, not yet wired into the AddPin/PinCertificate flow).
 
 ## How to capture a pin from the shell
 

@@ -107,11 +107,12 @@ For H3 (QUIC), the same keys get written but the Wireshark preference to enable 
 
 ## Per-session vs global
 
-| Setup                                | Behavior                                |
-| :----------------------------------- | :-------------------------------------- |
-| `SSLKEYLOGFILE=/tmp/k.log` env var   | Every session writes there              |
-| `WithKeyLogFile("/tmp/s1.log")` only | Only that session writes, others silent |
+| Setup                                | Behavior                                  |
+| :----------------------------------- | :---------------------------------------- |
+| `SSLKEYLOGFILE=/tmp/k.log` env var   | Every session writes there                |
+| `WithKeyLogFile("/tmp/s1.log")` only | Only that session writes, others silent   |
 | Both set                             | The explicit option wins for that session |
+| Neither set                          | No keylog                                 |
 
 ## Process-wide writer (non-file destinations)
 
@@ -131,7 +132,6 @@ defer httpcloak.SetKeyLogWriter(nil)   // detach when done
 ```
 
 `SetKeyLogWriter` accepts any `io.Writer` and applies process-wide. Pass `nil` to detach. A session with an explicit `WithKeyLogFile` still wins for that session; the writer is the fallback for sessions that don't pin a path themselves. Internally this delegates to `transport.SetKeyLogWriter`, with a few sibling helpers worth knowing about for advanced cases (`transport.GetKeyLogWriter`, `transport.SetKeyLogFile(path)`, `transport.NewKeyLogFileWriter(path)`, `transport.CloseKeyLog()`); reach for those when you need explicit control over the file lifecycle.
-| Neither set                          | No keylog                               |
 
 ## When you actually need this
 

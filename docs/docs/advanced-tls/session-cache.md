@@ -214,29 +214,19 @@ Most callers wire a backend through `WithSessionCache` and never touch the cache
 ```go
 import "github.com/sardanioss/httpcloak/transport"
 
-cache := transport.NewPersistableSessionCache(preset, protocol, errCb)
-// or with a backend already attached
-cache := transport.NewPersistableSessionCacheWithBackend(preset, protocol, backend, errCb)
+cache := transport.NewPersistableSessionCache()
+// or build one with the backend already attached:
+cache := transport.NewPersistableSessionCacheWithBackend(backend, preset, protocol, errCb)
 
-cache.SetBackend(backend, preset, protocol, errCb) // swap the backend at runtime
+cache.SetBackend(backend, preset, protocol, errCb) // attach or swap the backend at runtime
 cache.SetSessionIdentifier("alice")                 // namespace the keys
 id := cache.GetSessionIdentifier()
 cache.SetErrorCallback(newCb)                       // hot-swap the error sink
-
-state, _ := cache.Get(ctx, host, port)              // raw lookup, bypasses tls.Config wiring
-cache.Put(ctx, host, port, state)                   // raw insert
-
-// snapshot helpers for save / restore flows
-blob, _ := cache.Export()                           // []byte JSON, all entries
-_ = cache.Import(blob)                              // load entries back
-
-cache.Clear()                                       // drop everything (local + backend, scoped to identifier)
-n := cache.Count()                                  // count of in-memory entries
 ```
 
-`Export` / `Import` round-trip the in-memory state as a JSON blob, useful for warming a fresh process with the previous run's tickets without touching a network backend. `Clear` deletes every entry that lives under the cache's preset / protocol / identifier prefix; it doesn't reach into other identifiers' keyspaces.
+`NewPersistableSessionCache()` takes no arguments; the constructor builds a per-process in-memory cache that satisfies the stdlib `tls.ClientSessionCache` interface. The `(backend, preset, protocol, errorCallback)` set is supplied separately by the with-backend constructor or `SetBackend`, and that's where the cache key namespacing comes from. The `protocol` argument is one of `"h1"`, `"h2"`, `"h3"`, matching the wire-protocol slot a ticket binds to. Mixing protocols in one cache instance isn't supported; each protocol gets its own `PersistableSessionCache` under the hood, and `WithSessionCache` builds them in pairs (or triples when H3 is in play) for you.
 
-The `protocol` argument is one of `"h1"`, `"h2"`, `"h3"`, matching the wire-protocol slot a ticket binds to. Mixing protocols in one cache instance isn't supported; each protocol gets its own `PersistableSessionCache` under the hood, and `WithSessionCache` builds them in pairs (or triples when H3 is in play) for you.
+The cache also implements the stdlib `Get(sessionKey)` / `Put(sessionKey, *ClientSessionState)` methods that `*tls.Config.ClientSessionCache` expects, so pointing a fresh `*tls.Config` at one for unit tests is straightforward.
 
 ## Picking a backend
 

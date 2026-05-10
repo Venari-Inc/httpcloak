@@ -60,7 +60,7 @@ func main() {
 }
 ```
 
-The non-session API has `httpcloak.Client.PostForm(ctx, url, body)` (the alternate, stateless top-level API; build with `httpcloak.New(preset, opts...)`). It sets the Content-Type for you.
+The non-session API has `httpcloak.Client.PostForm(ctx, url, formData)` where `formData` is a `url.Values` (the stdlib type from `net/url`), not a `[]byte`. The wrapper handles encoding and sets the Content-Type. Build the client with `httpcloak.New(preset, opts...)`.
 
 </TabItem>
 <TabItem value="python" label="Python">

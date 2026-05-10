@@ -213,9 +213,9 @@ export interface SessionOptions {
   allowRedirects?: boolean;
   /** Maximum number of redirects to follow (default: 10) */
   maxRedirects?: number;
-  /** Number of retries on failure (default: 3, set to 0 to disable) */
+  /** Number of retries on failure (default: 0, opt in by setting a positive integer) */
   retry?: number;
-  /** Status codes to retry on (default: [429, 500, 502, 503, 504]) */
+  /** Status codes to retry on (default: empty; set explicitly to opt in, e.g. [429, 500, 502, 503, 504]) */
   retryOnStatus?: number[];
   /** Minimum wait time between retries in milliseconds (default: 500) */
   retryWaitMin?: number;
@@ -372,17 +372,11 @@ export class Session {
   /** Get a specific cookie by name with full metadata */
   getCookieDetailed(name: string): Cookie | null;
 
-  /**
-   * Get all cookies as a flat name-value object.
-   * @deprecated Will return Cookie[] with full metadata in a future release. Use getCookiesDetailed() for the new format now.
-   */
-  getCookies(): Record<string, string>;
+  /** Get all cookies with full metadata. Alias of getCookiesDetailed(); the older flat dict shape was removed in v1.6.5. */
+  getCookies(): Cookie[];
 
-  /**
-   * Get a specific cookie value by name.
-   * @deprecated Will return Cookie|null in a future release. Use getCookieDetailed() for the new format now.
-   */
-  getCookie(name: string): string | null;
+  /** Get a specific cookie by name. Alias of getCookieDetailed(); the older value-only shape was removed in v1.6.5. */
+  getCookie(name: string): Cookie | null;
 
   /** Set a cookie in the session */
   setCookie(
@@ -405,11 +399,8 @@ export class Session {
   /** Clear all cookies from the session */
   clearCookies(): void;
 
-  /**
-   * Get cookies as a property.
-   * @deprecated Will return Cookie[] with full metadata in a future release.
-   */
-  readonly cookies: Record<string, string>;
+  /** Cookies in the session jar with full metadata. Same shape as getCookies(). */
+  readonly cookies: Cookie[];
 
   // Proxy management
 
