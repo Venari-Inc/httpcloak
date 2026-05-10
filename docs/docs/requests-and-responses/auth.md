@@ -161,14 +161,14 @@ const s = new Session({ preset: "chrome-latest" });
 
 // Without auth: 401
 let r = await s.get("https://httpbin.org/basic-auth/user/passwd");
-console.log("no-auth:", r.status);
+console.log("no-auth:", r.statusCode);
 
 // With Authorization header: 200
 const creds = Buffer.from("user:passwd").toString("base64");
 r = await s.get("https://httpbin.org/basic-auth/user/passwd", {
   headers: { Authorization: `Basic ${creds}` },
 });
-console.log("with-auth:", r.status);
+console.log("with-auth:", r.statusCode);
 console.log(r.text);
 
 s.close();
@@ -182,7 +182,7 @@ using HttpCloak;
 using System;
 using System.Text;
 
-using var s = new Session(new SessionOptions { Preset = "chrome-latest" });
+using var s = new Session(preset: "chrome-latest");
 
 // Without auth: 401
 var r = s.Get("https://httpbin.org/basic-auth/user/passwd");

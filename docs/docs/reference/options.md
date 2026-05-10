@@ -171,7 +171,7 @@ Package-level loaders, not methods on `*Session`:
 |---|---|
 | `LoadSession(path string) (*Session, error)` | Restore a session saved with `Save`. |
 | `UnmarshalSession(data []byte) (*Session, error)` | Restore a session from bytes saved with `Marshal`. |
-| `Presets() []string` | All registered preset names (built-ins + any custom registrations). |
+| `Presets() []string` | The built-in preset names. Custom presets registered via `fingerprint.Register(name, *Preset)` go into a separate map and are NOT returned by `Presets()`. To resolve a name (built-in or custom) at runtime, use `fingerprint.Get(name)`. |
 
 ---
 

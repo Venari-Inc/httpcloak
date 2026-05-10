@@ -110,6 +110,8 @@ with httpcloak.Session(preset=name) as s:
 </TabItem>
 <TabItem value="node" label="Node.js">
 
+`describePreset` is exported at runtime from the Node binding's `index.js` but is missing from the shipped `index.d.ts` type declarations. Plain JS works as written; TypeScript callers either bypass the typings with a cast (`(httpcloak as any).describePreset(name)`) or extend their local declaration file with `export function describePreset(name: string): string;` until the upstream typings are updated.
+
 ```js
 const { Session, describePreset, loadPresetFromJSON } = require("httpcloak");
 

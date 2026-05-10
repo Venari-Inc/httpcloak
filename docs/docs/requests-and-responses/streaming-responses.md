@@ -79,7 +79,7 @@ with s.get("https://httpbin.org/stream/10", stream=True) as r:
     n = 0
     for line in r.iter_lines():
         n += 1
-        print(f"chunk {n}: {line.decode()}")
+        print(f"chunk {n}: {line}")
     print(f"got {n} lines")
 ```
 
@@ -117,7 +117,7 @@ Always call `stream.close()` after iterating, otherwise the connection leaks.
 ```csharp
 using HttpCloak;
 
-using var s = new Session(new SessionOptions { Preset = "chrome-latest" });
+using var s = new Session(preset: "chrome-latest");
 
 using var stream = s.GetStream("https://httpbin.org/stream/10");
 Console.WriteLine($"status: {stream.StatusCode}");
@@ -180,6 +180,130 @@ for _, sc := range stream.Headers["Set-Cookie"] {
     // parse sc with net/http or store as raw and inject on next request
 }
 ```
+
+## Server-Sent Events
+
+SSE is a long-lived HTTP response with `text/event-stream` as the content type. The body is a sequence of newline-delimited fields belonging to four field types: `event`, `data`, `id`, `retry`. A blank line dispatches whatever fields the parser has buffered as one event. Lines beginning with `:` are comments, used by some servers as keepalives, and the parser drops them.
+
+The lib ships an `SSEReader` that wraps a streaming response and parses these fields into `SSEEvent` records. The byte-level scanner, the buffer rules, the multi-line `data:` join, the comment skip, all of it lives in the lib. You hand it a stream and pull events back.
+
+`SSEReader`, `SSEEvent`, and `NewSSEReader` live in the `client` subpackage and operate on `*client.StreamResponse`, which is a different type from the `*httpcloak.StreamResponse` returned by `Session.GetStream`. The two streaming surfaces don't share a stream type today, so SSE consumers drop to the `client` package's API for the whole pipeline:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "io"
+
+    "github.com/sardanioss/httpcloak/client"
+)
+
+func main() {
+    c := client.NewClient("chrome-latest")
+    defer c.Close()
+
+    stream, err := c.GetStream(context.Background(), "https://example.com/events", nil)
+    if err != nil {
+        panic(err)
+    }
+    defer stream.Close()
+
+    reader := client.NewSSEReader(stream)
+    defer reader.Close()
+
+    for {
+        event, err := reader.Next()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            panic(err)
+        }
+        fmt.Printf("event=%s id=%s data=%s\n", event.Event, event.ID, event.Data)
+    }
+}
+```
+
+`Next()` blocks until the next blank line dispatches an event, returns `io.EOF` when the stream ends cleanly, and surfaces any scanner error otherwise. `Close()` on the reader closes the underlying `StreamResponse` and releases the connection back to the pool.
+
+The `SSEEvent` struct has four fields. `Event` is the event name from the `event:` field, empty when the server didn't set one. `Data` is the payload. Multi-line `data:` lines are joined with `\n` between them, matching the behaviour the SSE spec requires. `ID` carries the last event ID, which a client would normally echo back as `Last-Event-ID` on reconnect. `Retry` is the reconnection delay hint in milliseconds when the server sends one, parsed as a non-negative integer.
+
+For loops over multiple sources, or for a graceful shutdown driven by a context, the channel-based variant fits better:
+
+```go
+events := reader.Events()
+for {
+    select {
+    case event, ok := <-events:
+        if !ok {
+            return // stream closed
+        }
+        handle(event)
+    case <-ctx.Done():
+        reader.Close() // unblocks the goroutine inside Events()
+        return
+    }
+}
+```
+
+`Events()` runs `Next()` in a goroutine and pipes the results down the channel. When `Next()` returns an error (including `io.EOF`), the channel closes. Closing the reader from outside is the way to stop iteration early; the inner goroutine sees the EOF on the closed connection and exits.
+
+A few SSE behaviours worth knowing in advance. SSE connections are long-lived by design and the server can reissue cookies, rotate auth tokens, or 401 you mid-stream. None of that gets handled implicitly. If a token rotates, the caller closes the reader, refreshes the token, opens a new stream, optionally with `Last-Event-ID` set from the last `event.ID` so the server can replay missed events. Anti-bot vendors do fingerprint SSE consumer behaviour. Clients that read events too fast, in lockstep, or with timing that doesn't match a real browser's event loop stand out. The lib's H2 timing is browser-shaped at the transport layer, and the SSE parser doesn't add detectable polling artefacts on top, so what hits the wire on the read side stays clean.
+
+### Bindings
+
+`SSEReader` and `SSEEvent` are Go-only. The Python, Node, and .NET bindings expose the streaming response itself, not the SSE parser on top, so an SSE consumer in those languages parses the body with the binding's own line-iteration tools. The protocol is small enough that a hand-rolled parser fits in twenty lines.
+
+Python:
+
+```python
+with s.get("https://example.com/events", stream=True) as r:
+    event = {}
+    for line in r.iter_lines():
+        if line == "":
+            if event:
+                print(event)
+                event = {}
+            continue
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            event["data"] = event.get("data", "") + value + "\n"
+        else:
+            event[field] = value
+```
+
+Node:
+
+```js
+const stream = s.getStream("https://example.com/events");
+let buf = "";
+let event = {};
+for await (const chunk of stream) {
+    buf += chunk.toString();
+    let idx;
+    while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
+        if (line === "") { if (Object.keys(event).length) console.log(event); event = {}; continue; }
+        if (line.startsWith(":")) continue;
+        const colon = line.indexOf(":");
+        const field = colon === -1 ? line : line.slice(0, colon);
+        let value = colon === -1 ? "" : line.slice(colon + 1);
+        if (value.startsWith(" ")) value = value.slice(1);
+        if (field === "data") event.data = (event.data || "") + value + "\n";
+        else event[field] = value;
+    }
+}
+stream.close();
+```
+
+.NET sits on top of `StreamReader.ReadLine()` in a loop, with the same blank-line-dispatches-event rule. The shape mirrors the Python version closely enough to port directly.
 
 ## A note on H2 and H3
 

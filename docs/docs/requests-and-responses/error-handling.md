@@ -247,10 +247,7 @@ try {
 <TabItem value="dotnet" label=".NET">
 
 ```csharp
-using var s = new Session(new SessionOptions {
-    Preset = "chrome-latest",
-    Timeout = 2,
-});
+using var s = new Session(preset: "chrome-latest", timeout: 2);
 try {
     s.Get("https://httpbin.org/delay/10");
 } catch (HttpCloakException e) {

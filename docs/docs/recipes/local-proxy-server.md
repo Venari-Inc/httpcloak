@@ -124,7 +124,7 @@ Pass these to `StartLocalProxy(port, opts...)` (Go) or as kwargs to the binding 
 
 | Option | What it does |
 | --- | --- |
-| `WithProxyPreset(name)` | The fingerprint preset. `chrome-latest`, `firefox-148`, `safari-tp`, etc. Default is `chrome-146`. |
+| `WithProxyPreset(name)` | The fingerprint preset. `chrome-latest`, `firefox-148`, `safari-18`, etc. Default is `chrome-146`. |
 | `WithProxyTimeout(d)` | Per-request timeout. Default 30s. |
 | `WithProxyMaxConnections(n)` | Hard cap on concurrent client connections. Anything above gets dropped at accept. Default 1000. |
 | `WithProxyUpstream(tcp, udp)` | Chain through an upstream proxy. SOCKS5 or HTTP for `tcp`, MASQUE for `udp`. Both are optional. |
@@ -261,12 +261,12 @@ curl -x http://127.0.0.1:8080 \
      https://example.com/profile
 ```
 
-| Method | What it does |
-| --- | --- |
-| `RegisterSession(id, *Session) error` | Adds a session under `id`. Errors if `id` is taken. Calls `SetSessionIdentifier(id)` on the session so distributed TLS caches stay isolated per persona. |
-| `UnregisterSession(id) *Session` | Removes the session and returns it. Does NOT close it. That's your call, since you might reuse it. |
-| `GetSession(id) *Session` | Direct lookup. Returns `nil` if missing. |
-| `ListSessions() []string` | All registered IDs. Handy for `/health` endpoints. |
+| Method (Go) | What it does | Bindings |
+| --- | --- | --- |
+| `RegisterSession(id, *Session) error` | Adds a session under `id`. Errors if `id` is taken. Calls `SetSessionIdentifier(id)` on the session so distributed TLS caches stay isolated per persona. | `register_session` (Python), `registerSession` (Node), `RegisterSession` (.NET) |
+| `UnregisterSession(id) *Session` | Removes the session and returns it. Does NOT close it. That's your call, since you might reuse it. | `unregister_session` (Python), `unregisterSession` (Node), `UnregisterSession` (.NET) |
+| `GetSession(id) *Session` | Direct lookup. Returns `nil` if missing. | Go-only at this release |
+| `ListSessions() []string` | All registered IDs. Handy for `/health` endpoints. | Go-only at this release |
 
 Unknown session IDs return a 400 from the proxy, so typos surface fast instead of silently falling back to the default session.
 
@@ -282,14 +282,19 @@ Running more than one `LocalProxy` instance behind a load balancer turns the in-
 
 `WithProxySessionCache` replaces the in-memory store with an external backend so all instances share resumption state. A request that lands on a replica which has never seen the host before still gets 0-RTT resumption, as long as some other replica has handled the handshake earlier.
 
-The interface is small. `transport.SessionCacheBackend` only needs a `Get` and `Put`:
+The interface lives in `transport/tls_cache.go` and has five methods covering TLS tickets and ECH config caching:
 
 ```go
 type SessionCacheBackend interface {
-    Get(key string) ([]byte, bool, error)
-    Put(key string, value []byte, ttl time.Duration) error
+    Get(ctx context.Context, key string) (*TLSSessionState, error)
+    Put(ctx context.Context, key string, session *TLSSessionState, ttl time.Duration) error
+    Delete(ctx context.Context, key string) error
+    GetECHConfig(ctx context.Context, key string) ([]byte, error)
+    PutECHConfig(ctx context.Context, key string, config []byte, ttl time.Duration) error
 }
 ```
+
+`TLSSessionState` is a small struct holding the base64 ticket, the base64 session state, and a creation timestamp. The ECH methods are only consulted on the H3 path, so returning `(nil, nil)` from both is fine if you don't care about HTTP/3 ECH resumption.
 
 A Redis-backed implementation looks like this:
 
@@ -298,26 +303,37 @@ type RedisCache struct {
     client *redis.Client
 }
 
-func (r *RedisCache) Get(key string) ([]byte, bool, error) {
-    val, err := r.client.Get(context.Background(), key).Bytes()
+func (r *RedisCache) Get(ctx context.Context, key string) (*transport.TLSSessionState, error) {
+    val, err := r.client.Get(ctx, key).Bytes()
     if err == redis.Nil {
-        return nil, false, nil
+        return nil, nil
     }
     if err != nil {
-        return nil, false, err
+        return nil, err
     }
-    return val, true, nil
+    var state transport.TLSSessionState
+    if err := json.Unmarshal(val, &state); err != nil {
+        return nil, err
+    }
+    return &state, nil
 }
 
-func (r *RedisCache) Put(key string, value []byte, ttl time.Duration) error {
-    return r.client.Set(context.Background(), key, value, ttl).Err()
+func (r *RedisCache) Put(ctx context.Context, key string, session *transport.TLSSessionState, ttl time.Duration) error {
+    payload, err := json.Marshal(session)
+    if err != nil {
+        return err
+    }
+    return r.client.Set(ctx, key, payload, ttl).Err()
 }
+
+// Delete + GetECHConfig + PutECHConfig follow the same pattern.
+// See /advanced-tls/session-cache for a complete example.
 
 // Wire it in:
 lp, _ := httpcloak.StartLocalProxy(8080,
     httpcloak.WithProxyPreset("chrome-latest"),
-    httpcloak.WithProxySessionCache(&RedisCache{client: redisClient}, func(err error) {
-        log.Printf("session cache error: %v", err)
+    httpcloak.WithProxySessionCache(&RedisCache{client: redisClient}, func(operation, key string, err error) {
+        log.Printf("session cache error: op=%s key=%s err=%v", operation, key, err)
     }),
 )
 ```
@@ -335,9 +351,9 @@ The returned `*LocalProxy` is the whole control surface:
 | `Stop() error` | Graceful shutdown. Closes the listener, waits up to 10s for in-flight requests, closes the underlying session and idle conns. Idempotent. |
 | `Port() int` | The port the proxy actually bound to. Useful when you started with `0`. |
 | `IsRunning() bool` | True between successful start and `Stop`. |
-| `Stats() map[string]interface{}` | Snapshot. Cheap, no locks held during the call. |
+| `Stats() map[string]interface{}` | Snapshot. Briefly holds the session-registry read lock to count registered sessions; otherwise atomic loads. |
 
-`Stats()` returns:
+Go `Stats()` returns:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
@@ -349,7 +365,13 @@ The returned `*LocalProxy` is the whole control surface:
 | `max_connections` | `int` | The cap from `WithProxyMaxConnections`. |
 | `registered_sessions` | `int` | Count of entries in the session registry. |
 
-Wire `Stop()` into your shutdown handler, scrape `Stats()` into Prometheus on a 15-second interval, you're set. The Node and .NET bindings expose the same surface as `getStats()` and `GetStats()` returning a typed object.
+Wire `Stop()` into your shutdown handler, scrape `Stats()` into Prometheus on a 15-second interval, you're set.
+
+The binding Stats shapes differ from Go and from each other:
+
+- **.NET `GetStats()`** returns a `LocalProxyStats` class with `Running`, `Port`, `ActiveConnections`, `TotalRequests`, `Preset`, `MaxConnections`. The `registered_sessions` field is not deserialized into the typed object; if you need it from .NET, parse the underlying JSON yourself.
+- **Node `getStats()`** returns a `LocalProxyStats` interface with `totalRequests`, `activeConnections`, `failedRequests`, `bytesSent`, `bytesReceived`. Different field set entirely; the binding tracks request-level counters that the Go map doesn't expose at the same shape. Don't expect the Go keys above to round-trip.
+- **Python `get_stats()`** returns a dict mirroring the Go map keys.
 
 ## Multi-proxy pattern
 

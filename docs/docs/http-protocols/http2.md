@@ -101,7 +101,7 @@ import httpcloak
 with httpcloak.Session(preset="chrome-latest", timeout=30) as sess:
     r = sess.get("https://tls.peet.ws/api/all")
     body = r.json()
-    print("resp protocol:", r.http_version)
+    print("resp protocol:", r.protocol)
     print("http_version:", body["http_version"])
     print("akamai_text:", body["http2"]["akamai_fingerprint"])
     print("akamai_hash:", body["http2"]["akamai_fingerprint_hash"])
@@ -118,7 +118,7 @@ const { Session } = require("httpcloak");
   try {
     const r = await sess.get("https://tls.peet.ws/api/all");
     const body = JSON.parse(r.text);
-    console.log("resp protocol:", r.httpVersion);
+    console.log("resp protocol:", r.protocol);
     console.log("http_version:", body.http_version);
     console.log("akamai_text:", body.http2.akamai_fingerprint);
     console.log("akamai_hash:", body.http2.akamai_fingerprint_hash);
@@ -138,7 +138,7 @@ using System.Text.Json;
 using var sess = new Session(preset: "chrome-latest", timeout: 30);
 var r = sess.Get("https://tls.peet.ws/api/all");
 var body = JsonDocument.Parse(r.Text).RootElement;
-Console.WriteLine($"resp protocol: {r.HttpVersion}");
+Console.WriteLine($"resp protocol: {r.Protocol}");
 Console.WriteLine($"http_version: {body.GetProperty("http_version").GetString()}");
 var h2 = body.GetProperty("http2");
 Console.WriteLine($"akamai_text: {h2.GetProperty("akamai_fingerprint").GetString()}");

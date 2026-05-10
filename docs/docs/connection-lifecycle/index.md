@@ -14,3 +14,4 @@ A session isn't a one-shot object. It opens connections, caches tickets, accumul
 - [Protocol Switching](./protocol-switching): move between H1, H2 and H3 mid-session, with or without auto-negotiation
 - [Session Save and Restore](./session-save-restore): serialize the whole session to JSON, load it back in another process
 - [Fork](./fork): N sibling sessions sharing cookies and TLS state, each with its own connection pool
+- [Observability](./observability): Stats, IdleTime, Touch, ClearCache, GetTransport for inspecting live session state

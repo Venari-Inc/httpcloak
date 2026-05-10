@@ -57,7 +57,7 @@ func main() {
 }
 ```
 
-The non-session client has a shortcut too. `client.PostJSON(ctx, url, bodyBytes)` sets the Content-Type for you.
+The non-session API has a shortcut too. `httpcloak.Client` (the alternate, stateless API in the top-level package) exposes `PostJSON(ctx, url, body)` which sets the Content-Type for you. Construct it with `httpcloak.New(preset, opts...)`.
 
 </TabItem>
 <TabItem value="python" label="Python">
@@ -98,7 +98,7 @@ console.log(r.json().json); // { hello: "world", n: 42 }
 ```csharp
 using HttpCloak;
 
-using var s = new Session(new SessionOptions { Preset = "chrome-latest" });
+using var s = new Session(preset: "chrome-latest");
 
 var payload = new { hello = "world", n = 42 };
 var r = s.PostJson("https://httpbin.org/post", payload);

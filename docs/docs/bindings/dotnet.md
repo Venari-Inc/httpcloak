@@ -179,20 +179,20 @@ static Session Unmarshal(string data);
 ### Cookies
 
 ```csharp
-List<Cookie> GetCookies();                       // deprecated flat shape
-List<Cookie> GetCookiesDetailed();
-Cookie? GetCookie(string name);                   // deprecated
-Cookie? GetCookieDetailed(string name);
+List<Cookie> GetCookies();                        // full Cookie objects
+List<Cookie> GetCookiesDetailed();                // alias of GetCookies
+Cookie? GetCookie(string name);                   // full Cookie or null
+Cookie? GetCookieDetailed(string name);           // alias of GetCookie
 void SetCookie(string name, string value,
                string? domain = null, string? path = null,
                bool secure = false, bool httpOnly = false,
                string? sameSite = null,
-               int maxAge = 0, DateTime? expires = null);
+               long maxAge = 0, string? expires = null);
 void DeleteCookie(string name, string domain = "");
 void ClearCookies();
 ```
 
-The deprecated variants currently return shape-compatible data. They'll switch to the detailed shape in a future major. Migrating to `*Detailed` now keeps the call sites stable across that change.
+`GetCookies` and `GetCookiesDetailed` both return the same `List<Cookie>`; same with `GetCookie` and `GetCookieDetailed`. The `expires` parameter on `SetCookie` is the cookie's `Expires` attribute serialized as an RFC 1123 string (e.g. `"Wed, 21 Oct 2026 07:28:00 GMT"`), not a `DateTime`.
 
 ### Proxy management
 
@@ -231,11 +231,10 @@ public (string Username, string Password)? Auth { get; set; }   // default for a
 public sealed class Response
 {
     public int StatusCode { get; }
-    public Dictionary<string, string> Headers { get; }
-    public byte[] Body { get; }
+    public Dictionary<string, string[]> Headers { get; }   // multi-value, matches HTTP wire shape
+    public byte[] Content { get; }
     public string Text { get; }
-    public string FinalUrl { get; }
-    public string Url { get; }            // alias of FinalUrl
+    public string Url { get; }
     public string Protocol { get; }       // "http/1.1", "h2", "h3"
     public double Elapsed { get; }        // ms
     public List<Cookie> Cookies { get; }
@@ -244,12 +243,12 @@ public sealed class Response
     public string Reason { get; }
     public string? Encoding { get; }
 
-    public T Json<T>();
+    public T? Json<T>();
     public void RaiseForStatus();
 }
 ```
 
-`Json<T>()` parses the body using `System.Text.Json` with relaxed escaping. `RaiseForStatus()` throws `HttpCloakException` on `>= 400`.
+`Content` holds the raw response bytes; `Text` is the decoded string. `Json<T>()` parses `Text` using `System.Text.Json` with relaxed escaping and returns `T?` (nullable; null on parse failure or empty body). `RaiseForStatus()` throws `HttpCloakException` on `>= 400`.
 
 ## Conventions
 

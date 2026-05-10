@@ -973,6 +973,39 @@ func (s *Session) SetSessionIdentifier(sessionId string) {
 	s.inner.SetSessionIdentifier(sessionId)
 }
 
+// Stats returns a snapshot of session counters and timestamps.
+func (s *Session) Stats() session.SessionStats {
+	return s.inner.Stats()
+}
+
+// IdleTime returns time since the session last serviced a request.
+func (s *Session) IdleTime() time.Duration {
+	return s.inner.IdleTime()
+}
+
+// IsActive reports whether the session is still usable. False once Close has run.
+func (s *Session) IsActive() bool {
+	return s.inner.IsActive()
+}
+
+// Touch resets the idle timer to now without issuing a request.
+func (s *Session) Touch() {
+	s.inner.Touch()
+}
+
+// ClearCache drops the conditional-request cache (ETag / Last-Modified entries).
+// Cookies and TLS tickets are not affected.
+func (s *Session) ClearCache() {
+	s.inner.ClearCache()
+}
+
+// GetTransport returns the underlying transport. Escape hatch for advanced
+// transport-level access; the lib reserves the right to evolve the transport
+// surface between releases.
+func (s *Session) GetTransport() *transport.Transport {
+	return s.inner.GetTransport()
+}
+
 // Warmup simulates a real browser page load to warm TLS sessions, cookies,
 // and cache state. Fetches the HTML page and its subresources (CSS, JS, images)
 // with realistic headers, priorities, and timing.

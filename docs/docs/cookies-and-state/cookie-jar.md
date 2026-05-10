@@ -127,9 +127,10 @@ Console.WriteLine(r.Text);
 
 ## Inspecting the jar
 
-The session exposes the jar's contents through four methods:
+The session exposes the jar's contents through five methods:
 
-- `GetCookies()` returns the full list with domain, path, expiry, and flags
+- `GetCookies()` returns the full list of `CookieInfo` records with domain, path, expiry, and flags
+- `GetCookiesDetailed()` is an alias of `GetCookies` returning the same list (kept for forwards-compat with bindings that distinguish the two shapes)
 - `SetCookie(...)` adds or updates a cookie programmatically
 - `DeleteCookie(name, domain)` removes one (pass an empty domain to wipe matches across every domain)
 - `ClearCookies()` empties the jar
@@ -144,7 +145,7 @@ These are useful for tests, debugging, and seeding the jar before the first requ
 
 - It doesn't enforce `__Host-` and `__Secure-` cookie name prefixes with the strict RFC checks. The underlying flags (`Secure`, host-only) are still respected, but the prefix rules themselves aren't enforced separately.
 - It stores `SameSite` but doesn't act on it. There's no cross-site request tracking inside httpcloak, so cookies always go out on requests you initiate.
-- It doesn't garbage-collect expired cookies on every read. They get filtered at send time and during `ClearExpired()`. On a long-lived session where you want a clean snapshot, call `ClearExpired()` yourself.
+- It doesn't garbage-collect expired cookies on every read. They get filtered out at send time, but they keep occupying space in the jar until that filter runs. The internal `*CookieJar` has a `ClearExpired()` method, but the public `Session` surface does not currently re-export it. For a forced clean snapshot, the workaround is `ClearCookies()` plus a re-fetch of the host's authentication cookie.
 
 ## When you don't want the jar
 

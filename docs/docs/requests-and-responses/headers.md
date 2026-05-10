@@ -122,7 +122,7 @@ console.log(r.text);
 ```csharp
 using HttpCloak;
 
-using var s = new Session(new SessionOptions { Preset = "chrome-latest" });
+using var s = new Session(preset: "chrome-latest");
 
 var headers = new Dictionary<string, string> {
     { "X-My-Header", "hello-world" },
@@ -216,19 +216,136 @@ httpbin.org/headers is fine for "did my custom header show up?" checks, but it r
 
 ## Header order overrides
 
-The session exposes `SetHeaderOrder()` and `GetHeaderOrder()` for callers who need to override the emit order (a different preset baseline, a custom mobile order, whatever the situation calls for). Pass a list of lowercase header names, or `nil` / an empty slice to reset to the preset's default.
+`SetHeaderOrder(order []string)` mutates the session's emit sequence at runtime. The next request through the session uses the new order on the wire. `GetHeaderOrder()` returns whatever's currently active, custom or preset-default. Pass `nil` or an empty slice to `SetHeaderOrder` and the session falls back to the preset's baked-in order, which is what you want most of the time.
+
+This is the nuclear option. The preset's order is copied from a real browser capture, and any deviation from it is new fingerprint signal that the target can hash. Use this method only when you've confirmed (with peet output, with a captured PCAP, with vendor docs) that the target runs a header-order check no shipped preset matches. That situation is rare. For nearly every site, `chrome-latest` or `firefox-148` or `safari-18` already lines up.
+
+Header names go in lowercase. HTTP/2 and HTTP/3 send field names lowercase on the wire, the preset stores them lowercase, the transport lowercases anything you pass anyway. Sticking to lowercase in your code keeps the surface boring and matches what tooling like peet shows. The current Chrome desktop order, copied from the table above, looks like this:
+
+```
+sec-ch-ua
+sec-ch-ua-mobile
+sec-ch-ua-platform
+upgrade-insecure-requests
+user-agent
+accept
+sec-fetch-site
+sec-fetch-mode
+sec-fetch-user
+sec-fetch-dest
+accept-encoding
+accept-language
+priority
+```
+
+Two situations come up in practice. First is rotating between known-good orders mid-session for adversarial probing: dropping into a stripped-down order to see whether the target actually checks order at all, or swapping a Chrome order for a Firefox order on the same TLS connection to test cross-fingerprint detection. Second is pinning an explicit order before a `Save` checkpoint when you want determinism on reload, since the stored config carries the preset name but the runtime override sits on the transport struct.
+
+Heads up on persistence: the custom order is held in memory on the transport. `Save` / `LoadSession` round-trip the preset, cookies, TLS tickets, and ECH configs, but they don't currently serialize a custom header order. If you set a custom order, save the session, then load it, the session comes back on the preset's default. Re-apply your `SetHeaderOrder` call after `LoadSession` if you need the override to stick.
+
+Custom orders don't disable the preset's HPACK position table for situational headers. The preset reserves slots for headers Chrome only emits some of the time (`cache-control`, `content-type`, `content-length`, `cookie`, `origin`, `referer`), and those slots stay live on top of whatever base order you set. So a custom order of `[user-agent, accept, x-my-header]` plus a POST with `Content-Type: application/json` and a `Cookie` from the jar still places `content-type` and `cookie` at the offsets the preset reserves for them. The custom order replaces the default base sequence, not the slot machinery underneath.
+
+<Tabs groupId="lang">
+<TabItem value="go" label="Go">
 
 ```go
 s := httpcloak.NewSession("chrome-latest")
 defer s.Close()
 
 s.SetHeaderOrder([]string{
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
     "user-agent",
     "accept",
     "accept-language",
     "accept-encoding",
     "x-my-header",
 })
+
+current := s.GetHeaderOrder()
+fmt.Println(current)
+
+// Reset to preset default
+s.SetHeaderOrder(nil)
 ```
 
-This is the nuclear option. Don't reach for it unless the target runs a custom order check that no shipped preset matches. The preset's order is the right answer 99% of the time, and changing it for any other reason just makes the request stand out.
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+import httpcloak
+
+s = httpcloak.Session(preset="chrome-latest")
+
+s.set_header_order([
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "user-agent",
+    "accept",
+    "accept-language",
+    "accept-encoding",
+    "x-my-header",
+])
+
+print(s.get_header_order())
+
+# Reset to preset default
+s.set_header_order([])
+```
+
+</TabItem>
+<TabItem value="nodejs" label="Node.js">
+
+```js
+const { Session } = require("httpcloak");
+
+const s = new Session({ preset: "chrome-latest" });
+
+s.setHeaderOrder([
+  "sec-ch-ua",
+  "sec-ch-ua-mobile",
+  "sec-ch-ua-platform",
+  "user-agent",
+  "accept",
+  "accept-language",
+  "accept-encoding",
+  "x-my-header",
+]);
+
+console.log(s.getHeaderOrder());
+
+// Reset to preset default
+s.setHeaderOrder([]);
+```
+
+</TabItem>
+<TabItem value="dotnet" label=".NET">
+
+```csharp
+using HttpCloak;
+
+using var s = new Session(preset: "chrome-latest");
+
+s.SetHeaderOrder(new[] {
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "user-agent",
+    "accept",
+    "accept-language",
+    "accept-encoding",
+    "x-my-header",
+});
+
+var current = s.GetHeaderOrder();
+Console.WriteLine(string.Join(", ", current));
+
+// Reset to preset default
+s.SetHeaderOrder(null);
+```
+
+</TabItem>
+</Tabs>
+
+Verify the result on [tls.peet.ws/api/all](https://tls.peet.ws/api/all). The `http2.sent_frames[].headers` array shows the exact order on the wire after your override, and that's the only place to confirm the change took effect.

@@ -48,7 +48,8 @@ func main() {
     if err != nil {
         panic(err)
     }
-    fmt.Println(resp.StatusCode, string(resp.Body))
+    body, _ := resp.Text()
+    fmt.Println(resp.StatusCode, body)
 }
 ```
 

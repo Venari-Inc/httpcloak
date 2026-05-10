@@ -94,7 +94,7 @@ using HttpCloak;
 using var s = new Session(preset: "chrome-latest");
 
 s.Warmup("https://tls.peet.ws/api/all", timeoutMs: 60000);
-Console.WriteLine($"cookies: {s.GetCookies().Length}");
+Console.WriteLine($"cookies: {s.GetCookies().Count}");
 
 var r = s.Get("https://tls.peet.ws/api/all");
 Console.WriteLine($"status={r.StatusCode}");

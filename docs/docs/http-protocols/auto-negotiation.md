@@ -116,11 +116,12 @@ import httpcloak
 def hit(label, **kwargs):
     with httpcloak.Session(preset="chrome-latest", timeout=30, **kwargs) as sess:
         r = sess.get("https://tls.peet.ws/api/all")
-        print(f"[{label}] protocol={r.http_version} status={r.status_code}")
+        print(f"[{label}] protocol={r.protocol} status={r.status_code}")
 
 hit("default")
-hit("force-h2", force_http2=True)
-hit("disable-h3", disable_http3=True)
+hit("force-h2", http_version="h2")
+# Bindings have no direct H3-disable kwarg; pinning to h2 has the same effect.
+hit("force-h2-only", http_version="h2")
 ```
 
 </TabItem>
@@ -133,7 +134,7 @@ async function hit(label, opts) {
   const sess = new Session({ preset: "chrome-latest", timeout: 30, ...opts });
   try {
     const r = await sess.get("https://tls.peet.ws/api/all");
-    console.log(`[${label}] protocol=${r.httpVersion} status=${r.statusCode}`);
+    console.log(`[${label}] protocol=${r.protocol} status=${r.statusCode}`);
   } finally {
     sess.close();
   }
@@ -141,8 +142,9 @@ async function hit(label, opts) {
 
 (async () => {
   await hit("default", {});
-  await hit("force-h2", { forceHttp2: true });
-  await hit("disable-h3", { disableHttp3: true });
+  await hit("force-h2", { httpVersion: "h2" });
+  // Bindings have no direct H3-disable; pin to h2 for the same effect.
+  await hit("force-h2-only", { httpVersion: "h2" });
 })();
 ```
 
@@ -152,17 +154,15 @@ async function hit(label, opts) {
 ```csharp
 using HttpCloak;
 
-void Hit(string label, Action<SessionOptions>? configure = null) {
-    var opts = new SessionOptions { Preset = "chrome-latest", Timeout = 30 };
-    configure?.Invoke(opts);
-    using var sess = new Session(opts);
+void Hit(string label, string httpVersion = "auto") {
+    using var sess = new Session(preset: "chrome-latest", timeout: 30, httpVersion: httpVersion);
     var r = sess.Get("https://tls.peet.ws/api/all");
-    Console.WriteLine($"[{label}] protocol={r.HttpVersion} status={r.StatusCode}");
+    Console.WriteLine($"[{label}] protocol={r.Protocol} status={r.StatusCode}");
 }
 
-Hit("default");
-Hit("force-h2", o => o.ForceHttp2 = true);
-Hit("disable-h3", o => o.DisableHttp3 = true);
+Hit("default");          // auto-negotiate
+Hit("force-h2", "h2");   // pin to HTTP/2
+// HTTP/3 alone has no direct disable arg; pin to h2 for the same effect.
 ```
 
 </TabItem>

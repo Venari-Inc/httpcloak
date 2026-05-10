@@ -62,7 +62,7 @@ The same rule applies on the way in: a server can only **set** a `Secure` cookie
 
 The jar checks expiry at send time. A cookie whose `Expires` is in the past gets skipped on the next outbound match. A session cookie (no `Expires`, no `Max-Age`) lives until the session is closed or `ClearCookies()` is called.
 
-The jar doesn't sweep expired cookies eagerly. For a clean snapshot on a long-lived session, call `ClearExpired()` yourself.
+The jar doesn't sweep expired cookies eagerly. They get filtered at send time but stay resident in the map until then. There's no public `ClearExpired()` on `Session` (the method exists only on the internal `*CookieJar`). For a forced sweep, `ClearCookies()` empties everything; cookies still valid get refetched on the next round-trip.
 
 ## Worked example
 

@@ -119,9 +119,9 @@ func main() {
 ```python
 import httpcloak
 
-with httpcloak.Session(preset="chrome-latest", force_http3=True, timeout=30) as sess:
+with httpcloak.Session(preset="chrome-latest", http_version="h3", timeout=30) as sess:
     r = sess.get("https://www.cloudflare.com/")
-    print("resp protocol:", r.http_version)
+    print("resp protocol:", r.protocol)
     print("status:", r.status_code)
 ```
 
@@ -132,10 +132,10 @@ with httpcloak.Session(preset="chrome-latest", force_http3=True, timeout=30) as 
 const { Session } = require("httpcloak");
 
 (async () => {
-  const sess = new Session({ preset: "chrome-latest", forceHttp3: true, timeout: 30 });
+  const sess = new Session({ preset: "chrome-latest", httpVersion: "h3", timeout: 30 });
   try {
     const r = await sess.get("https://www.cloudflare.com/");
-    console.log("resp protocol:", r.httpVersion);
+    console.log("resp protocol:", r.protocol);
     console.log("status:", r.statusCode);
   } finally {
     sess.close();
@@ -149,9 +149,9 @@ const { Session } = require("httpcloak");
 ```csharp
 using HttpCloak;
 
-using var sess = new Session(preset: "chrome-latest", forceHttp3: true, timeout: 30);
+using var sess = new Session(preset: "chrome-latest", httpVersion: "h3", timeout: 30);
 var r = sess.Get("https://www.cloudflare.com/");
-Console.WriteLine($"resp protocol: {r.HttpVersion}");
+Console.WriteLine($"resp protocol: {r.Protocol}");
 Console.WriteLine($"status: {r.StatusCode}");
 ```
 

@@ -76,6 +76,9 @@ with httpcloak.Session(preset="chrome-latest") as s:
 const s = new httpcloak.Session({ preset: "chrome-latest" });
 try {
   await s.get("https://tls.peet.ws/api/all");     // auto
+  // Note: TypeScript types currently declare refresh() as () => void.
+  // The runtime accepts a protocol string. TS callers can use a cast:
+  //   (s as any).refresh("h2");
   s.refresh("h2");
   await s.get("https://tls.peet.ws/api/all");     // h2
   s.refresh("h1");

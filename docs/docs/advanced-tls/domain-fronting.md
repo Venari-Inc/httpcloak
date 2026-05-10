@@ -111,7 +111,7 @@ using var s = new Session(preset: "chrome-latest");
 var r = await s.GetAsync(
     "https://front-domain.example.com/",
     headers: new() { { "Host", "real-target.example.com" } });
-Console.WriteLine($"{r.StatusCode} {r.Body.Length}");
+Console.WriteLine($"{r.StatusCode} {r.Content.Length}");
 ```
 
 </TabItem>

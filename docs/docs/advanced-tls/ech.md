@@ -106,29 +106,9 @@ s := httpcloak.NewSession("chrome-latest",
 ```
 
 </TabItem>
-<TabItem value="python" label="Python">
-
-```python
-with httpcloak.Session(preset="chrome-latest", disable_ech=True) as s:
-    ...
-```
-
-</TabItem>
-<TabItem value="node" label="Node.js">
-
-```js
-const s = new Session({ preset: 'chrome-latest', disableEch: true });
-```
-
-</TabItem>
-<TabItem value="dotnet" label=".NET">
-
-```csharp
-using var s = new Session(preset: "chrome-latest", disableEch: true);
-```
-
-</TabItem>
 </Tabs>
+
+The Python, Node, and .NET bindings don't currently expose a kwarg for disabling ECH. The lookup runs by default and there's no per-session opt-out from those languages. If you need it disabled from a binding, the workaround is a Go-side `LocalProxy` constructed with `WithDisableECH()` and the binding's HTTP client pointed at the proxy.
 
 There's no security hit from turning ECH off. The only thing lost is the SNI privacy bit. Everything else about the handshake is identical.
 
@@ -157,7 +137,7 @@ fmt.Println(resp.StatusCode)
 ```python
 with httpcloak.Session(
     preset="chrome-latest",
-    ech_from="cloudflare-ech.com",
+    ech_config_domain="cloudflare-ech.com",
 ) as s:
     r = s.get("https://example.com/")
     print(r.status_code)
@@ -169,7 +149,7 @@ with httpcloak.Session(
 ```js
 const s = new Session({
   preset: 'chrome-latest',
-  echFrom: 'cloudflare-ech.com',
+  echConfigDomain: 'cloudflare-ech.com',
 });
 const r = await s.get('https://example.com/');
 console.log(r.statusCode);
@@ -181,7 +161,7 @@ console.log(r.statusCode);
 ```csharp
 using var s = new Session(
     preset: "chrome-latest",
-    echFrom: "cloudflare-ech.com");
+    echConfigDomain: "cloudflare-ech.com");
 
 var r = await s.GetAsync("https://example.com/");
 Console.WriteLine(r.StatusCode);
@@ -211,7 +191,7 @@ Empty means the host doesn't publish (or the DNS path is broken). Non-empty mean
 
 ## Caveats
 
-- **ECH on H1/H2 is opt-in only.** The H3 dial path auto-fetches the target's HTTPS RR. The H2 path only consults `WithECHFrom` and `WithECHConfig`, it doesn't auto-probe the target. The H1 path doesn't touch ECH at all. For sessions forced to H1/H2, set `WithECHFrom` explicitly. (There's a bug filed against this in the project's internal tracker.)
+- **ECH on H1/H2 is opt-in only.** The H3 dial path auto-fetches the target's HTTPS RR. The H2 path only consults `WithECHFrom` (session-level) and `client.WithECHConfig` (the alternate `client.Client` API in the `httpcloak/client` subpackage, which takes a raw config blob), it doesn't auto-probe the target. The H1 path doesn't touch ECH at all. For sessions forced to H1/H2, set `WithECHFrom` explicitly. (There's a bug filed against this in the project's internal tracker.)
 - ECH requires TLS 1.3. The lib bumps `MinVersion` to 1.3 automatically when an ECH config is present.
 - The HTTPS RR lookup is cached per host for the configured TTL, so repeated requests don't re-resolve.
 - ECH config rotation: providers rotate keys every few hours. httpcloak handles this transparently. If a stale config gets cached and rejected, the next dial refetches.

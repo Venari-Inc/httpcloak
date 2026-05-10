@@ -49,6 +49,8 @@ const sidebars: SidebarsConfig = {
         'fingerprinting/custom-ja3',
         'fingerprinting/akamai-shorthand',
         'fingerprinting/per-resource-priority',
+        'fingerprinting/tcp-fingerprint',
+        'fingerprinting/programmatic-headers',
       ],
     },
     {
@@ -61,6 +63,7 @@ const sidebars: SidebarsConfig = {
         'connection-lifecycle/protocol-switching',
         'connection-lifecycle/session-save-restore',
         'connection-lifecycle/fork',
+        'connection-lifecycle/observability',
       ],
     },
     {
@@ -84,6 +87,8 @@ const sidebars: SidebarsConfig = {
         'advanced-tls/tls-keylog',
         'advanced-tls/domain-fronting',
         'advanced-tls/cert-pinning',
+        'advanced-tls/insecure-skip-verify',
+        'advanced-tls/session-cache',
       ],
     },
     {
@@ -132,6 +137,7 @@ const sidebars: SidebarsConfig = {
         'recipes/long-running-scraper-patterns',
         'recipes/debug-with-wireshark',
         'recipes/local-proxy-server',
+        'recipes/preset-pool-rotation',
       ],
     },
     'changelog',

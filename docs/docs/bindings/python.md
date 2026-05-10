@@ -180,18 +180,18 @@ Session.unmarshal(data: str) -> Session
 ### Cookie management
 
 ```python
-session.cookies                           # dict (deprecated flat shape)
-session.get_cookies() -> Dict[str, str]   # deprecated
-session.get_cookies_detailed() -> List[Cookie]
-session.get_cookie(name) -> Optional[str]      # deprecated
-session.get_cookie_detailed(name) -> Optional[Cookie]
+session.cookies                                # Dict[str, str] property (flat name->value shape)
+session.get_cookies() -> List[Cookie]          # full Cookie objects
+session.get_cookies_detailed() -> List[Cookie] # alias of get_cookies
+session.get_cookie(name) -> Optional[Cookie]   # full Cookie object or None
+session.get_cookie_detailed(name) -> Optional[Cookie]  # alias of get_cookie
 session.set_cookie(name, value, domain="", path="/", secure=False,
                    http_only=False, same_site="", max_age=0, expires=None)
 session.delete_cookie(name, domain="")
 session.clear_cookies()
 ```
 
-The `_detailed` variants return full `Cookie` objects with `domain`, `path`, `expires`, `max_age`, `secure`, `http_only`, `same_site`. The flat-dict variants will eventually return the detailed shape too, which is why they're tagged deprecated. Migrate when convenient.
+`get_cookies` and `get_cookies_detailed` both return the same `List[Cookie]`; same with `get_cookie` and `get_cookie_detailed`. Each `Cookie` carries `name`, `value`, `domain`, `path`, `expires`, `max_age`, `secure`, `http_only`, `same_site`. The `session.cookies` property still returns the flat `Dict[str, str]` shape for quick lookups by name only.
 
 ### Proxy management
 

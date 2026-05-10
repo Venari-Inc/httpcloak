@@ -86,7 +86,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 with httpcloak.Session(preset="chrome-latest") as s:
     s.warmup("https://example.com/")
-    s.post("https://example.com/login", body=login_body)
+    s.post("https://example.com/login", data=login_body)
 
     forks = s.fork(4)
 

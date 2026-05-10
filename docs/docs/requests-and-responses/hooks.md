@@ -49,7 +49,7 @@ Typical uses:
 
 Hooks fire in the order you registered them. Three PreRequest hooks run 1, 2, 3 on every request. PreRequest hooks short-circuit on the first error: if hook 2 returns an error, hook 3 never fires and the request never goes out.
 
-PostResponse runs the same order, but errors don't stop anything. Each hook runs to completion regardless.
+PostResponse runs the same order with the same short-circuit behaviour. The first hook returning an error stops the chain and surfaces the error back to the request caller.
 
 ## Wiping hooks
 
@@ -105,74 +105,9 @@ func main() {
 ```
 
 </TabItem>
-<TabItem value="python" label="Python">
-
-```python
-import httpcloak
-
-c = httpcloak.Client(preset="chrome-latest")
-
-def on_pre(req):
-    print(f"[pre] {req.method} {req.url}")
-    req.headers["X-Request-ID"] = "abc-123"
-
-def on_post(resp):
-    tag = "WARN" if resp.status_code >= 400 else "ok  "
-    print(f"[post] {tag} {resp.status_code} {resp.final_url}")
-
-c.on_pre_request(on_pre)
-c.on_post_response(on_post)
-
-c.get("https://httpbin.org/get")
-c.get("https://httpbin.org/status/418")
-```
-
-</TabItem>
-<TabItem value="nodejs" label="Node.js">
-
-```js
-const { Client } = require("httpcloak");
-
-const c = new Client({ preset: "chrome-latest" });
-
-c.onPreRequest((req) => {
-  console.log(`[pre] ${req.method} ${req.url}`);
-  req.headers["X-Request-ID"] = "abc-123";
-});
-
-c.onPostResponse((resp) => {
-  const tag = resp.statusCode >= 400 ? "WARN" : "ok  ";
-  console.log(`[post] ${tag} ${resp.statusCode} ${resp.finalUrl}`);
-});
-
-await c.get("https://httpbin.org/get");
-await c.get("https://httpbin.org/status/418");
-```
-
-</TabItem>
-<TabItem value="dotnet" label=".NET">
-
-```csharp
-using HttpCloak;
-
-using var c = new Client(preset: "chrome-latest");
-
-c.OnPreRequest(req => {
-    Console.WriteLine($"[pre] {req.Method} {req.Url}");
-    req.Headers["X-Request-ID"] = "abc-123";
-});
-
-c.OnPostResponse(resp => {
-    var tag = resp.StatusCode >= 400 ? "WARN" : "ok  ";
-    Console.WriteLine($"[post] {tag} {resp.StatusCode} {resp.FinalUrl}");
-});
-
-await c.GetAsync("https://httpbin.org/get");
-await c.GetAsync("https://httpbin.org/status/418");
-```
-
-</TabItem>
 </Tabs>
+
+The Python, Node, and .NET bindings do not currently expose the hook surface (no `Client` class, no `on_pre_request` / `onPreRequest` / `OnPreRequest` methods). For binding callers, the equivalent pattern is wrapping the binding's `Session` in your own thin class that runs your callbacks before and after every `get`/`post`/`request` call. A two-line wrapper covers the common cases (logging, header injection, response tagging) without needing lib-side hook support.
 
 What you'll see on stdout:
 

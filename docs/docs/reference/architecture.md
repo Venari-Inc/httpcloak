@@ -106,7 +106,7 @@ The other things this package owns:
 
 The preset registry and the data structures behind it.
 
-- `presets.go`: Go-defined presets (Chrome 133-146, Firefox 133, Safari 18, plus iOS and Android variants). Each preset is a `func() *Preset`.
+- `presets.go`: Go-defined presets (Chrome 133-146, Firefox 133, Firefox 148, Safari 18, plus iOS and Android variants). Each preset is a `func() *Preset`.
 - `embedded/*.json`: JSON-defined presets (Chrome 147 and 148 across every platform). Loaded at package init and registered alongside the Go presets.
 - `custom_preset.go`: JSON parsing plus `BuildPreset`. Powers both the embedded JSONs and user-supplied presets through `LoadPresetFromFile` and `LoadPresetFromJSON`.
 - `describe.go`: the inverse of `BuildPreset`. Emits canonical JSON from a `*Preset`. Round-trip stable.

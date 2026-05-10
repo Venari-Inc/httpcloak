@@ -60,7 +60,7 @@ func main() {
 }
 ```
 
-The non-session client has `client.PostForm(ctx, url, bodyBytes)` which sets the Content-Type for you.
+The non-session API has `httpcloak.Client.PostForm(ctx, url, body)` (the alternate, stateless top-level API; build with `httpcloak.New(preset, opts...)`). It sets the Content-Type for you.
 
 </TabItem>
 <TabItem value="python" label="Python">
@@ -89,7 +89,7 @@ const { Session } = require("httpcloak");
 const s = new Session({ preset: "chrome-latest" });
 
 const r = await s.post("https://httpbin.org/post", {
-  form: { user: "alice", token: "abc 123" },
+  data: { user: "alice", token: "abc 123" },
 });
 
 console.log(r.json().form);
@@ -101,7 +101,7 @@ console.log(r.json().form);
 ```csharp
 using HttpCloak;
 
-using var s = new Session(new SessionOptions { Preset = "chrome-latest" });
+using var s = new Session(preset: "chrome-latest");
 
 var formData = new Dictionary<string, string> {
     { "user", "alice" },
@@ -221,7 +221,7 @@ The `files=` kwarg accepts:
 
 ```js
 const r = await s.post("https://httpbin.org/post", {
-  form: { comment: "hello there" },
+  data: { comment: "hello there" },
   files: {
     file: {
       filename: "note.txt",
@@ -241,7 +241,7 @@ console.log(r.json().files);  // { file: "file body bytes" }
 ```csharp
 using HttpCloak;
 
-using var s = new Session(new SessionOptions { Preset = "chrome-latest" });
+using var s = new Session(preset: "chrome-latest");
 
 var fields = new Dictionary<string, string> {
     { "comment", "hello there" }

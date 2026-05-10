@@ -60,7 +60,7 @@ import httpcloak
 with httpcloak.Session(preset="chrome-latest", timeout=30) as session:
     r = session.get("https://tls.peet.ws/api/all")
     print("status:", r.status_code)
-    print("protocol:", r.http_version)
+    print("protocol:", r.protocol)
     print(r.text)
 ```
 
@@ -75,7 +75,7 @@ const { Session } = require("httpcloak");
   try {
     const r = await session.get("https://tls.peet.ws/api/all");
     console.log("status:", r.statusCode);
-    console.log("protocol:", r.httpVersion);
+    console.log("protocol:", r.protocol);
     console.log(r.text);
   } finally {
     session.close();
@@ -92,7 +92,7 @@ using HttpCloak;
 using var session = new Session(preset: "chrome-latest", timeout: 30);
 var r = session.Get("https://tls.peet.ws/api/all");
 Console.WriteLine($"status: {r.StatusCode}");
-Console.WriteLine($"protocol: {r.HttpVersion}");
+Console.WriteLine($"protocol: {r.Protocol}");
 Console.WriteLine(r.Text);
 ```
 

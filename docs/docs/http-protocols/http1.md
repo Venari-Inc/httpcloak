@@ -96,10 +96,10 @@ func main() {
 ```python
 import httpcloak
 
-with httpcloak.Session(preset="chrome-latest", force_http1=True, timeout=30) as sess:
+with httpcloak.Session(preset="chrome-latest", http_version="h1", timeout=30) as sess:
     r = sess.get("https://tls.peet.ws/api/all")
     body = r.json()
-    print("resp protocol:", r.http_version)
+    print("resp protocol:", r.protocol)
     print("peet http_version:", body["http_version"])
     print("ja3:", body["tls"]["ja3_hash"])
 ```
@@ -111,11 +111,11 @@ with httpcloak.Session(preset="chrome-latest", force_http1=True, timeout=30) as 
 const { Session } = require("httpcloak");
 
 (async () => {
-  const sess = new Session({ preset: "chrome-latest", forceHttp1: true, timeout: 30 });
+  const sess = new Session({ preset: "chrome-latest", httpVersion: "h1", timeout: 30 });
   try {
     const r = await sess.get("https://tls.peet.ws/api/all");
     const body = JSON.parse(r.text);
-    console.log("resp protocol:", r.httpVersion);
+    console.log("resp protocol:", r.protocol);
     console.log("peet http_version:", body.http_version);
     console.log("ja3:", body.tls.ja3_hash);
   } finally {
@@ -131,10 +131,10 @@ const { Session } = require("httpcloak");
 using HttpCloak;
 using System.Text.Json;
 
-using var sess = new Session(preset: "chrome-latest", forceHttp1: true, timeout: 30);
+using var sess = new Session(preset: "chrome-latest", httpVersion: "h1", timeout: 30);
 var r = sess.Get("https://tls.peet.ws/api/all");
 var body = JsonDocument.Parse(r.Text).RootElement;
-Console.WriteLine($"resp protocol: {r.HttpVersion}");
+Console.WriteLine($"resp protocol: {r.Protocol}");
 Console.WriteLine($"peet http_version: {body.GetProperty("http_version").GetString()}");
 Console.WriteLine($"ja3: {body.GetProperty("tls").GetProperty("ja3_hash").GetString()}");
 ```

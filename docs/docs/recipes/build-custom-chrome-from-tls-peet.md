@@ -200,7 +200,7 @@ In the example above both capture and shipped preset are Chrome 148 on Linux, so
 
 ## Step 4: Edit and rename
 
-Always rename the preset before registering. `RegisterStrict` (used internally by the loader) refuses to shadow a built-in name, so overwriting `chrome-latest` with a custom build is rejected at registration time.
+Always rename the preset before registering. `fingerprint.RegisterStrict(name, *Preset)` errors on any name collision, both with built-ins (`chrome-latest`, `chrome-148`, etc.) and with previously registered customs, so overwriting a shipped preset is rejected at registration time. The plain `fingerprint.Register` is the silent-overwrite path; the embedded preset loader uses `Register`, while the public JSON loaders push through `RegisterStrict`.
 
 ```json
 {
