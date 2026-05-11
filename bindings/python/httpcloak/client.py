@@ -992,6 +992,20 @@ def _setup_lib(lib):
     lib.httpcloak_delete_cookie.restype = None
     lib.httpcloak_clear_cookies.argtypes = [c_int64]
     lib.httpcloak_clear_cookies.restype = None
+    lib.httpcloak_session_clear_cache.argtypes = [c_int64]
+    lib.httpcloak_session_clear_cache.restype = None
+    lib.httpcloak_session_set_conditional_cache.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_conditional_cache.restype = None
+    lib.httpcloak_session_get_conditional_cache.argtypes = [c_int64]
+    lib.httpcloak_session_get_conditional_cache.restype = c_int
+    lib.httpcloak_session_set_follow_redirects.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_follow_redirects.restype = None
+    lib.httpcloak_session_get_follow_redirects.argtypes = [c_int64]
+    lib.httpcloak_session_get_follow_redirects.restype = c_int
+    lib.httpcloak_session_set_max_redirects.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_max_redirects.restype = None
+    lib.httpcloak_session_get_max_redirects.argtypes = [c_int64]
+    lib.httpcloak_session_get_max_redirects.restype = c_int
     lib.httpcloak_free_string.argtypes = [c_void_p]
     lib.httpcloak_free_string.restype = None
     lib.httpcloak_version.argtypes = []
@@ -1512,6 +1526,7 @@ class Session:
         enable_speculative_tls: bool = False,
         switch_protocol: Optional[str] = None,
         without_cookie_jar: bool = False,
+        without_conditional_cache: bool = False,
         ja3: Optional[str] = None,
         akamai: Optional[str] = None,
         extra_fp: Optional[Dict[str, any]] = None,
@@ -1567,6 +1582,8 @@ class Session:
             config["switch_protocol"] = switch_protocol
         if without_cookie_jar:
             config["without_cookie_jar"] = True
+        if without_conditional_cache:
+            config["without_conditional_cache"] = True
         if ja3:
             config["ja3"] = ja3
         if akamai:
@@ -2434,6 +2451,57 @@ class Session:
     def clear_cookies(self):
         """Clear all cookies from the session."""
         self._lib.httpcloak_clear_cookies(self._handle)
+
+    # =========================================================================
+    # Conditional Cache and Redirect Runtime Control
+    # =========================================================================
+
+    def clear_cache(self) -> None:
+        """
+        Drop the session's per-URL conditional-cache map (ETag / Last-Modified).
+        The next request to each URL goes out without If-None-Match /
+        If-Modified-Since headers. Cookies and TLS tickets are not touched.
+        """
+        self._lib.httpcloak_session_clear_cache(self._handle)
+
+    def set_conditional_cache(self, enabled: bool) -> None:
+        """
+        Toggle the session's ETag / If-Modified-Since handling at runtime.
+
+        When disabled, the session stops injecting cache validators on
+        outgoing requests and stops storing them from responses; the existing
+        cache map is preserved (re-enabling resumes using it). Pair with
+        :meth:`clear_cache` to also wipe previously-stored validators.
+        """
+        self._lib.httpcloak_session_set_conditional_cache(self._handle, 1 if enabled else 0)
+
+    def get_conditional_cache(self) -> bool:
+        """Return the session's current conditional-cache state."""
+        return self._lib.httpcloak_session_get_conditional_cache(self._handle) != 0
+
+    def set_follow_redirects(self, enabled: bool) -> None:
+        """
+        Toggle the session's redirect-following policy at runtime. The change
+        takes effect on the next request and persists until set again.
+        Per-request overrides on :meth:`request` / :meth:`request_async`
+        still win over this value for that one call.
+        """
+        self._lib.httpcloak_session_set_follow_redirects(self._handle, 1 if enabled else 0)
+
+    def get_follow_redirects(self) -> bool:
+        """Return the session's current redirect-following policy."""
+        return self._lib.httpcloak_session_get_follow_redirects(self._handle) != 0
+
+    def set_max_redirects(self, max_redirects: int) -> None:
+        """
+        Update the session's redirect cap at runtime. Values of zero or below
+        are ignored, leaving the prior cap (or the default of 10) in place.
+        """
+        self._lib.httpcloak_session_set_max_redirects(self._handle, max_redirects)
+
+    def get_max_redirects(self) -> int:
+        """Return the session's current redirect cap."""
+        return self._lib.httpcloak_session_get_max_redirects(self._handle)
 
     @property
     def cookies(self) -> Dict[str, str]:

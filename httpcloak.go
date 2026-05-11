@@ -175,6 +175,19 @@ type Request struct {
 	// This is useful for LocalProxy where each request can have different TLS-only settings
 	// via the X-HTTPCloak-TlsOnly header.
 	TLSOnly *bool
+
+	// FollowRedirects, when non-nil, overrides the session's follow-redirects
+	// policy for this single request. Set to &true to follow redirects on this
+	// request, &false to surface the 3xx response back to the caller. When nil,
+	// the session-level setting is used.
+	FollowRedirects *bool
+
+	// DisableConditionalCache, when true, skips ETag / If-Modified-Since handling
+	// for this single request: no cache validators are injected on the way out
+	// and any ETag / Last-Modified on the response is not stored in the session
+	// cache. Useful for forcing a fresh fetch without touching the session-wide
+	// setting.
+	DisableConditionalCache bool
 }
 
 // RedirectInfo contains information about a redirect response
@@ -378,6 +391,7 @@ type sessionConfig struct {
 	enableSpeculativeTLS bool   // Enable speculative TLS optimization for proxy connections
 	switchProtocol        string // Protocol to switch to after Refresh() (e.g. "h1", "h2", "h3")
 	withoutCookieJar      bool   // Disable internal cookie jar entirely (caller manages cookies via headers)
+	withoutConditionalCache bool // Disable ETag / If-Modified-Since handling entirely
 
 	// Distributed session cache
 	sessionCacheBackend       transport.SessionCacheBackend
@@ -587,6 +601,21 @@ func WithoutCookieJar() SessionOption {
 	}
 }
 
+// WithoutConditionalCache disables the session's ETag / If-Modified-Since
+// handling for the lifetime of the session. When set, the session never
+// injects If-None-Match or If-Modified-Since headers and never stores those
+// validators from responses.
+//
+// Useful for benchmarking, fingerprint testing, or any workflow that needs
+// every request to hit the origin fresh regardless of prior responses.
+// Toggle the same state at runtime with Session.SetConditionalCacheEnabled,
+// or skip the cache for a single request via Request.DisableConditionalCache.
+func WithoutConditionalCache() SessionOption {
+	return func(c *sessionConfig) {
+		c.withoutConditionalCache = true
+	}
+}
+
 // WithConnectTo sets a host mapping for domain fronting.
 // Requests to requestHost will connect to connectHost instead.
 // The TLS SNI and Host header will still use requestHost.
@@ -745,8 +774,9 @@ func NewSession(preset string, opts ...SessionOption) *Session {
 		KeyLogFile:         cfg.keyLogFile,
 		DisableECH:            cfg.disableECH,
 		EnableSpeculativeTLS: cfg.enableSpeculativeTLS,
-		SwitchProtocol:        cfg.switchProtocol,
-		WithoutCookieJar:      cfg.withoutCookieJar,
+		SwitchProtocol:          cfg.switchProtocol,
+		WithoutCookieJar:        cfg.withoutCookieJar,
+		WithoutConditionalCache: cfg.withoutConditionalCache,
 	}
 
 	// Retry configuration
@@ -806,11 +836,13 @@ func (s *Session) Do(ctx context.Context, req *Request) (*Response, error) {
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:     req.Method,
-		URL:        req.URL,
-		Headers:    req.Headers,
-		BodyReader: req.Body,
-		TLSOnly:    req.TLSOnly,
+		Method:                  req.Method,
+		URL:                     req.URL,
+		Headers:                 req.Headers,
+		BodyReader:              req.Body,
+		TLSOnly:                 req.TLSOnly,
+		FollowRedirects:         req.FollowRedirects,
+		DisableConditionalCache: req.DisableConditionalCache,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
@@ -847,11 +879,13 @@ func (s *Session) DoWithBody(ctx context.Context, req *Request, bodyReader io.Re
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:     req.Method,
-		URL:        req.URL,
-		Headers:    req.Headers,
-		BodyReader: bodyReader,
-		TLSOnly:    req.TLSOnly,
+		Method:                  req.Method,
+		URL:                     req.URL,
+		Headers:                 req.Headers,
+		BodyReader:              bodyReader,
+		TLSOnly:                 req.TLSOnly,
+		FollowRedirects:         req.FollowRedirects,
+		DisableConditionalCache: req.DisableConditionalCache,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
@@ -999,6 +1033,45 @@ func (s *Session) ClearCache() {
 	s.inner.ClearCache()
 }
 
+// SetConditionalCacheEnabled toggles the session's ETag / If-Modified-Since
+// handling at runtime. When false, the session stops injecting cache
+// validators on outgoing requests and stops storing them from responses.
+// Pair with ClearCache to also wipe any previously-stored validators.
+func (s *Session) SetConditionalCacheEnabled(enabled bool) {
+	s.inner.SetConditionalCacheEnabled(enabled)
+}
+
+// ConditionalCacheEnabled reports whether the session is currently injecting
+// and storing ETag / If-Modified-Since validators.
+func (s *Session) ConditionalCacheEnabled() bool {
+	return s.inner.ConditionalCacheEnabled()
+}
+
+// SetFollowRedirects toggles the session's redirect-following policy at
+// runtime. A per-request Request.FollowRedirects override still wins over
+// this value for that one request.
+func (s *Session) SetFollowRedirects(enabled bool) {
+	s.inner.SetFollowRedirects(enabled)
+}
+
+// SetMaxRedirects updates the session's redirect cap at runtime. Values
+// of zero or below are ignored, leaving the prior cap (or the default
+// of 10) in place.
+func (s *Session) SetMaxRedirects(max int) {
+	s.inner.SetMaxRedirects(max)
+}
+
+// FollowRedirects reports the session's current redirect-following policy.
+// Per-request overrides via Request.FollowRedirects don't change this value.
+func (s *Session) FollowRedirects() bool {
+	return s.inner.FollowRedirects()
+}
+
+// MaxRedirects reports the session's current redirect cap.
+func (s *Session) MaxRedirects() int {
+	return s.inner.MaxRedirects()
+}
+
 // GetTransport returns the underlying transport. Escape hatch for advanced
 // transport-level access; the lib reserves the right to evolve the transport
 // surface between releases.
@@ -1117,11 +1190,13 @@ func (s *Session) DoStream(ctx context.Context, req *Request) (*StreamResponse, 
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:     req.Method,
-		URL:        req.URL,
-		Headers:    req.Headers,
-		BodyReader: req.Body,
-		TLSOnly:    req.TLSOnly,
+		Method:                  req.Method,
+		URL:                     req.URL,
+		Headers:                 req.Headers,
+		BodyReader:              req.Body,
+		TLSOnly:                 req.TLSOnly,
+		FollowRedirects:         req.FollowRedirects,
+		DisableConditionalCache: req.DisableConditionalCache,
 	}
 
 	resp, err := s.inner.RequestStream(ctx, sReq)

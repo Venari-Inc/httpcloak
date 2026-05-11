@@ -77,6 +77,11 @@ type Session struct {
 	// Cache validation headers per URL (for If-None-Match, If-Modified-Since)
 	cacheEntries map[string]*cacheEntry
 
+	// conditionalCacheEnabled controls whether ETag / If-Modified-Since handling
+	// is active for this session. Initialised from !Config.WithoutConditionalCache
+	// and toggleable at runtime via SetConditionalCacheEnabled.
+	conditionalCacheEnabled bool
+
 	// Client hints requested by each host via Accept-CH header
 	// Key: host (e.g., "example.com"), Value: set of requested hint names
 	clientHints map[string]map[string]bool
@@ -208,18 +213,19 @@ func NewSessionWithOptions(id string, config *protocol.SessionConfig, opts *Sess
 	}
 
 	return &Session{
-		ID:             id,
-		CreatedAt:      time.Now(),
-		LastUsed:       time.Now(),
-		RequestCount:   0,
-		Config:         config,
-		transport:      t,
-		cookies:        NewCookieJar(),
-		cacheEntries:   make(map[string]*cacheEntry),
-		clientHints:    make(map[string]map[string]bool),
-		keyLogWriter:   keyLogWriter,
-		switchProtocol: switchProto,
-		active:         true,
+		ID:                      id,
+		CreatedAt:               time.Now(),
+		LastUsed:                time.Now(),
+		RequestCount:            0,
+		Config:                  config,
+		transport:               t,
+		cookies:                 NewCookieJar(),
+		cacheEntries:            make(map[string]*cacheEntry),
+		conditionalCacheEnabled: !config.WithoutConditionalCache,
+		clientHints:             make(map[string]map[string]bool),
+		keyLogWriter:            keyLogWriter,
+		switchProtocol:          switchProto,
+		active:                  true,
 	}
 }
 
@@ -247,14 +253,17 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 		req.Headers["cache-control"] = []string{"max-age=0"}
 	}
 
-	// Add cache validation headers (If-None-Match, If-Modified-Since)
-	// This makes requests look like a real browser that caches resources
-	if cached, exists := s.cacheEntries[req.URL]; exists {
-		if cached.etag != "" {
-			req.Headers["If-None-Match"] = []string{cached.etag}
-		}
-		if cached.lastModified != "" {
-			req.Headers["If-Modified-Since"] = []string{cached.lastModified}
+	// Add cache validation headers (If-None-Match, If-Modified-Since) when
+	// the conditional cache is enabled session-wide AND the per-request flag
+	// hasn't opted out. Skipping here also means a fresh fetch on this URL.
+	if s.conditionalCacheEnabled && !req.DisableConditionalCache {
+		if cached, exists := s.cacheEntries[req.URL]; exists {
+			if cached.etag != "" {
+				req.Headers["If-None-Match"] = []string{cached.etag}
+			}
+			if cached.lastModified != "" {
+				req.Headers["If-Modified-Since"] = []string{cached.lastModified}
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -385,12 +394,17 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 	// Parse Accept-CH header to store requested client hints for this host
 	s.parseAcceptCH(host, resp.Headers)
 
-	// Store cache validation headers from response for future requests
-	s.storeCacheHeaders(req.URL, resp.Headers)
+	// Store cache validation headers from response for future requests, unless
+	// the conditional cache is disabled session-wide or the caller asked to
+	// skip it for this request.
+	if s.conditionalCacheEnabled && !req.DisableConditionalCache {
+		s.storeCacheHeaders(req.URL, resp.Headers)
+	}
 
 	// Handle redirects
 	if isRedirectStatus(resp.StatusCode) {
-		// Check if we should follow redirects
+		// Per-request override (req.FollowRedirects, when non-nil) wins over the
+		// session-level Config.FollowRedirects. Default is to follow.
 		followRedirects := true
 		maxRedirects := 10
 		if s.Config != nil {
@@ -398,6 +412,9 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 			if s.Config.MaxRedirects > 0 {
 				maxRedirects = s.Config.MaxRedirects
 			}
+		}
+		if req.FollowRedirects != nil {
+			followRedirects = *req.FollowRedirects
 		}
 
 		if followRedirects {
@@ -1082,6 +1099,76 @@ func (s *Session) ClearCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cacheEntries = make(map[string]*cacheEntry)
+}
+
+// SetConditionalCacheEnabled toggles the session's ETag / If-Modified-Since
+// handling at runtime. When false, the session stops injecting cache
+// validators and stops storing them from responses; the existing cache map
+// is preserved (re-enabling will resume using it). To wipe the stored
+// validators, pair this with ClearCache.
+func (s *Session) SetConditionalCacheEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conditionalCacheEnabled = enabled
+}
+
+// ConditionalCacheEnabled reports whether the session is currently injecting
+// and storing ETag / If-Modified-Since validators.
+func (s *Session) ConditionalCacheEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.conditionalCacheEnabled
+}
+
+// SetFollowRedirects toggles the session's redirect-following policy at
+// runtime. Per-request overrides via transport.Request.FollowRedirects still
+// take precedence over this value.
+func (s *Session) SetFollowRedirects(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Config == nil {
+		s.Config = &protocol.SessionConfig{}
+	}
+	s.Config.FollowRedirects = enabled
+}
+
+// SetMaxRedirects updates the session's redirect cap at runtime. A value of
+// zero or below leaves the cap at the prior setting (or the default of 10
+// if none was configured).
+func (s *Session) SetMaxRedirects(max int) {
+	if max <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Config == nil {
+		s.Config = &protocol.SessionConfig{}
+	}
+	s.Config.MaxRedirects = max
+}
+
+// FollowRedirects reports the session's current redirect-following policy.
+// Returns true when the session will follow redirects by default; per-request
+// overrides can still flip the behaviour for a single call.
+func (s *Session) FollowRedirects() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Config == nil {
+		return true
+	}
+	return s.Config.FollowRedirects
+}
+
+// MaxRedirects reports the session's current redirect cap. Returns the
+// configured value, or 10 (the default applied in requestWithRedirects)
+// when nothing has been set.
+func (s *Session) MaxRedirects() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Config == nil || s.Config.MaxRedirects <= 0 {
+		return 10
+	}
+	return s.Config.MaxRedirects
 }
 
 // SetProxy sets or updates the proxy for all protocols (HTTP/1.1, HTTP/2, HTTP/3)

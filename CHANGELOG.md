@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Conditional-cache control surface (all bindings)** — The session has always behaved like a real browser by replaying `ETag` and `Last-Modified` as `If-None-Match` / `If-Modified-Since` on the next request to the same URL. That's the right default for fingerprint authenticity, but callers had no way to opt out short of recreating the session. Three new controls land together:
+  - `WithoutConditionalCache()` SessionOption (Go), `without_conditional_cache=True` (Python), `withoutConditionalCache: true` (Node.js), `withoutConditionalCache: true` (.NET): disables validator injection and storage for the lifetime of the session.
+  - Runtime mutators: `SetConditionalCacheEnabled(bool)` / `ConditionalCacheEnabled()` (Go), `set_conditional_cache(bool)` / `get_conditional_cache()` (Python), `setConditionalCache(bool)` / `getConditionalCache()` (Node.js), `SetConditionalCache(bool)` / `GetConditionalCache()` (.NET). Toggle the same state mid-session; existing entries are preserved when paused.
+  - Per-request opt-out via `Request.DisableConditionalCache` (Go) and the new `disableConditionalCache` parameter on `Request` / `RequestAsync` (.NET). Skips both injection and storage for one call without changing the session-wide setting.
+  - `ClearCache()` (`clear_cache()` / `clearCache()` / `ClearCache()`) is now exposed in every binding (was Go-only).
+- **Redirect runtime control (all bindings)** — `Session.SetFollowRedirects(bool)` / `FollowRedirects()` and `SetMaxRedirects(int)` / `MaxRedirects()` (Go, with snake_case Python and camelCase Node / PascalCase .NET equivalents). The per-request override `Request.FollowRedirects *bool` (Go) and `allowRedirects` parameter on `Request` / `RequestAsync` (.NET) wins over the session default for a single call. Closes the gap that previously required recreating a session to flip redirect-following.
+
+### Internal
+
+- `transport.Request` and `httpcloak.Request` gain `FollowRedirects *bool` and `DisableConditionalCache bool` fields. The session-layer `requestWithRedirects` honours both before falling back to `s.Config.FollowRedirects` and the session's `conditionalCacheEnabled` flag.
+- New C entry points: `httpcloak_session_clear_cache`, `httpcloak_session_set_conditional_cache`, `httpcloak_session_get_conditional_cache`, `httpcloak_session_set_follow_redirects`, `httpcloak_session_get_follow_redirects`, `httpcloak_session_set_max_redirects`, `httpcloak_session_get_max_redirects`. The clib `RequestOptions` and `RequestConfig` JSON shapes accept `follow_redirects` and `disable_conditional_cache`.
+- `protocol.SessionConfig` gains `WithoutConditionalCache bool`; `protocol.RequestOptions` gains `DisableConditionalCache bool` and the pre-existing `FollowRedirects *bool` field is now actually consulted.
+
 ## [1.6.6] - 2026-05-09
 
 ### Added

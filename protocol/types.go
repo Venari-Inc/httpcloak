@@ -76,6 +76,12 @@ type RequestOptions struct {
 	// Disable retry for this request
 	DisableRetry bool `json:"disableRetry,omitempty"`
 
+	// DisableConditionalCache skips injection of If-None-Match / If-Modified-Since
+	// headers from the session's per-URL cache for this request AND skips storing
+	// any ETag / Last-Modified from the response. Lets callers force a fresh fetch
+	// without touching the session-wide setting.
+	DisableConditionalCache bool `json:"disableConditionalCache,omitempty"`
+
 	// User-Agent override (empty = use preset)
 	UserAgent string `json:"userAgent,omitempty"`
 
@@ -221,6 +227,13 @@ type SessionConfig struct {
 	// headers — useful when an application maintains its own jar (database,
 	// shared cache) and wants the lib to be byte-transparent.
 	WithoutCookieJar bool `json:"withoutCookieJar,omitempty"`
+
+	// WithoutConditionalCache disables the session's per-URL ETag /
+	// Last-Modified handling entirely. When true, the session never injects
+	// If-None-Match or If-Modified-Since headers and never stores those
+	// validators from responses. Toggle at runtime with
+	// Session.SetConditionalCacheEnabled(bool).
+	WithoutConditionalCache bool `json:"withoutConditionalCache,omitempty"`
 
 	// Default authentication (can be overridden per-request)
 	Auth *AuthConfig `json:"auth,omitempty"`

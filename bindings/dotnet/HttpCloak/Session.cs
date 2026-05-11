@@ -171,6 +171,7 @@ public sealed class Session : IDisposable
     /// <param name="quicIdleTimeout">QUIC idle timeout in seconds (default: 30). Set higher for long-lived HTTP/3 connections.</param>
     /// <param name="switchProtocol">Protocol to switch to after Refresh(): "h1", "h2", "h3" (default: null, no switch)</param>
     /// <param name="withoutCookieJar">Disable internal cookie jar entirely — caller manages cookies via per-request headers (default: false)</param>
+    /// <param name="withoutConditionalCache">Disable ETag / If-Modified-Since handling for the lifetime of the session — every request hits the origin fresh (default: false)</param>
     /// <param name="tcpTtl">TCP/IP TTL override: 128=Windows, 64=Linux/macOS (default: null, no spoofing)</param>
     /// <param name="tcpMss">TCP Maximum Segment Size override: typically 1460 (default: null)</param>
     /// <param name="tcpWindowSize">TCP Window Size override: 64240=Windows, 65535=Linux/macOS (default: null)</param>
@@ -201,6 +202,7 @@ public sealed class Session : IDisposable
         bool enableSpeculativeTls = false,
         string? switchProtocol = null,
         bool withoutCookieJar = false,
+        bool withoutConditionalCache = false,
         string? ja3 = null,
         string? akamai = null,
         Dictionary<string, object>? extraFp = null,
@@ -237,6 +239,7 @@ public sealed class Session : IDisposable
             EnableSpeculativeTls = enableSpeculativeTls,
             SwitchProtocol = switchProtocol,
             WithoutCookieJar = withoutCookieJar,
+            WithoutConditionalCache = withoutConditionalCache,
             Ja3 = ja3,
             Akamai = akamai,
             ExtraFp = extraFp,
@@ -515,7 +518,7 @@ public sealed class Session : IDisposable
     /// <param name="auth">Basic auth (username, password). If null, uses session Auth.</param>
     /// <param name="parameters">Query parameters</param>
     /// <param name="cookies">Cookies to send with this request</param>
-    public Response Request(string method, string url, string? body = null, Dictionary<string, string>? headers = null, int? timeout = null, (string, string)? auth = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, string? fetchMode = null)
+    public Response Request(string method, string url, string? body = null, Dictionary<string, string>? headers = null, int? timeout = null, (string, string)? auth = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, string? fetchMode = null, bool? allowRedirects = null, bool disableConditionalCache = false)
     {
         ThrowIfDisposed();
 
@@ -535,6 +538,8 @@ public sealed class Session : IDisposable
             Headers = headers.Count > 0 ? headers : null,
             Timeout = timeout * 1000,
             FetchMode = fetchMode,
+            FollowRedirects = allowRedirects,
+            DisableConditionalCache = disableConditionalCache,
         };
 
         string requestJson = JsonSerializer.Serialize(request, JsonContext.Relaxed.RequestConfig);
@@ -875,7 +880,7 @@ public sealed class Session : IDisposable
     /// <param name="auth">Basic auth (username, password). If null, uses session Auth.</param>
     /// <param name="parameters">Query parameters</param>
     /// <param name="cookies">Cookies to send with this request</param>
-    public Task<Response> RequestAsync(string method, string url, string? body = null, Dictionary<string, string>? headers = null, int? timeout = null, (string, string)? auth = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, CancellationToken cancellationToken = default, string? fetchMode = null)
+    public Task<Response> RequestAsync(string method, string url, string? body = null, Dictionary<string, string>? headers = null, int? timeout = null, (string, string)? auth = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, CancellationToken cancellationToken = default, string? fetchMode = null, bool? allowRedirects = null, bool disableConditionalCache = false)
     {
         ThrowIfDisposed();
 
@@ -892,6 +897,8 @@ public sealed class Session : IDisposable
             Headers = headers.Count > 0 ? headers : null,
             Timeout = timeout,
             FetchMode = fetchMode,
+            FollowRedirects = allowRedirects,
+            DisableConditionalCache = disableConditionalCache,
         };
 
         string requestJson = JsonSerializer.Serialize(request, JsonContext.Relaxed.RequestConfig);
@@ -1069,6 +1076,83 @@ public sealed class Session : IDisposable
     {
         ThrowIfDisposed();
         Native.ClearCookies(_handle);
+    }
+
+    // =========================================================================
+    // Conditional Cache and Redirect Control
+    // =========================================================================
+
+    /// <summary>
+    /// Drop the session's per-URL conditional-cache map. After this call the
+    /// next request to each URL goes out without If-None-Match / If-Modified-Since
+    /// headers. Cookies and TLS tickets are not touched.
+    /// </summary>
+    public void ClearCache()
+    {
+        ThrowIfDisposed();
+        Native.SessionClearCache(_handle);
+    }
+
+    /// <summary>
+    /// Toggle the session's ETag / If-Modified-Since handling at runtime.
+    /// When disabled, the session stops injecting cache validators on outgoing
+    /// requests and stops storing them from responses; the existing cache map
+    /// is preserved (re-enabling resumes using it). Pair with ClearCache to
+    /// also wipe previously-stored validators.
+    /// </summary>
+    public void SetConditionalCache(bool enabled)
+    {
+        ThrowIfDisposed();
+        Native.SessionSetConditionalCache(_handle, enabled ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Read the session's current conditional-cache state.
+    /// </summary>
+    public bool GetConditionalCache()
+    {
+        ThrowIfDisposed();
+        return Native.SessionGetConditionalCache(_handle) != 0;
+    }
+
+    /// <summary>
+    /// Toggle the session's redirect-following policy at runtime. The change
+    /// takes effect on the next request and persists until set again. The
+    /// initial value is the <c>allowRedirects</c> argument the session was
+    /// constructed with (default true).
+    /// </summary>
+    public void SetFollowRedirects(bool enabled)
+    {
+        ThrowIfDisposed();
+        Native.SessionSetFollowRedirects(_handle, enabled ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Read the session's current redirect-following policy.
+    /// </summary>
+    public bool GetFollowRedirects()
+    {
+        ThrowIfDisposed();
+        return Native.SessionGetFollowRedirects(_handle) != 0;
+    }
+
+    /// <summary>
+    /// Update the session's redirect cap at runtime. Values of zero or below
+    /// are ignored, leaving the prior cap (or the default of 10) in place.
+    /// </summary>
+    public void SetMaxRedirects(int max)
+    {
+        ThrowIfDisposed();
+        Native.SessionSetMaxRedirects(_handle, max);
+    }
+
+    /// <summary>
+    /// Read the session's current redirect cap.
+    /// </summary>
+    public int GetMaxRedirects()
+    {
+        ThrowIfDisposed();
+        return Native.SessionGetMaxRedirects(_handle);
     }
 
     // =========================================================================
@@ -2782,6 +2866,10 @@ internal class SessionConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool WithoutCookieJar { get; set; }
 
+    [JsonPropertyName("without_conditional_cache")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool WithoutConditionalCache { get; set; }
+
     [JsonPropertyName("ja3")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Ja3 { get; set; }
@@ -2845,6 +2933,14 @@ internal class RequestConfig
     [JsonPropertyName("fetch_mode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FetchMode { get; set; }
+
+    [JsonPropertyName("follow_redirects")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? FollowRedirects { get; set; }
+
+    [JsonPropertyName("disable_conditional_cache")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool DisableConditionalCache { get; set; }
 }
 
 internal class CookieData
@@ -2981,6 +3077,14 @@ internal class RequestOptions
     [JsonPropertyName("fetch_mode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FetchMode { get; set; }
+
+    [JsonPropertyName("follow_redirects")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? FollowRedirects { get; set; }
+
+    [JsonPropertyName("disable_conditional_cache")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool DisableConditionalCache { get; set; }
 }
 
 internal class StreamOptions
@@ -2996,6 +3100,14 @@ internal class StreamOptions
     [JsonPropertyName("fetch_mode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FetchMode { get; set; }
+
+    [JsonPropertyName("follow_redirects")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? FollowRedirects { get; set; }
+
+    [JsonPropertyName("disable_conditional_cache")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool DisableConditionalCache { get; set; }
 }
 
 internal class StreamMetadata

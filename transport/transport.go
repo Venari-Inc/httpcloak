@@ -191,6 +191,18 @@ type Request struct {
 	// This is useful for LocalProxy where each request can have different TLS-only settings
 	// via the X-HTTPCloak-TlsOnly header.
 	TLSOnly *bool
+
+	// FollowRedirects, when non-nil, overrides the session's follow-redirects
+	// policy for this single request. Session-layer concept; the transport
+	// itself does not consult this field.
+	FollowRedirects *bool
+
+	// DisableConditionalCache, when true, instructs the session layer to skip
+	// injection of If-None-Match / If-Modified-Since headers from the session's
+	// per-URL cache for this request AND to skip storing any ETag / Last-Modified
+	// from the response. Session-layer concept; the transport itself does not
+	// consult this field.
+	DisableConditionalCache bool
 }
 
 // RedirectInfo contains information about a redirect response

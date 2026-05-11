@@ -243,6 +243,8 @@ export interface SessionOptions {
   switchProtocol?: string;
   /** Disable internal cookie jar entirely — caller manages cookies via per-request headers (default: false) */
   withoutCookieJar?: boolean;
+  /** Disable ETag / If-Modified-Since handling for the lifetime of the session (default: false) */
+  withoutConditionalCache?: boolean;
   /** Custom JA3 fingerprint string (e.g., "771,4865-4866-4867-...,0-23-65281-...,29-23-24,0") */
   ja3?: string;
   /** Custom Akamai HTTP/2 fingerprint string (e.g., "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p") */
@@ -401,6 +403,45 @@ export class Session {
 
   /** Cookies in the session jar with full metadata. Same shape as getCookies(). */
   readonly cookies: Cookie[];
+
+  // Conditional cache and redirect runtime control
+
+  /**
+   * Drop the session's per-URL conditional-cache map (ETag / Last-Modified).
+   * The next request to each URL goes out without If-None-Match /
+   * If-Modified-Since headers. Cookies and TLS tickets are not touched.
+   */
+  clearCache(): void;
+
+  /**
+   * Toggle the session's ETag / If-Modified-Since handling at runtime.
+   * When disabled, the session stops injecting cache validators on outgoing
+   * requests and stops storing them from responses; the existing cache map
+   * is preserved (re-enabling resumes using it). Pair with clearCache() to
+   * also wipe previously-stored validators.
+   */
+  setConditionalCache(enabled: boolean): void;
+
+  /** Read the session's current conditional-cache state. */
+  getConditionalCache(): boolean;
+
+  /**
+   * Toggle the session's redirect-following policy at runtime. The change
+   * takes effect on the next request and persists until set again.
+   */
+  setFollowRedirects(enabled: boolean): void;
+
+  /** Read the session's current redirect-following policy. */
+  getFollowRedirects(): boolean;
+
+  /**
+   * Update the session's redirect cap at runtime. Values of zero or below
+   * are ignored, leaving the prior cap (or the default of 10) in place.
+   */
+  setMaxRedirects(max: number): void;
+
+  /** Read the session's current redirect cap. */
+  getMaxRedirects(): number;
 
   // Proxy management
 

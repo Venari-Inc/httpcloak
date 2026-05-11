@@ -66,6 +66,7 @@ const sidebars: SidebarsConfig = {
         'connection-lifecycle/observability',
         'connection-lifecycle/session-manager',
         'connection-lifecycle/dns-cache',
+        'connection-lifecycle/conditional-cache',
       ],
     },
     {

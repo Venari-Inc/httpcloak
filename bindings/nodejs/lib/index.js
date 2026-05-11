@@ -830,6 +830,13 @@ function getLib() {
       httpcloak_set_cookie: nativeLibHandle.func("httpcloak_set_cookie", "void", ["int64", "str"]),
       httpcloak_delete_cookie: nativeLibHandle.func("httpcloak_delete_cookie", "void", ["int64", "str", "str"]),
       httpcloak_clear_cookies: nativeLibHandle.func("httpcloak_clear_cookies", "void", ["int64"]),
+      httpcloak_session_clear_cache: nativeLibHandle.func("httpcloak_session_clear_cache", "void", ["int64"]),
+      httpcloak_session_set_conditional_cache: nativeLibHandle.func("httpcloak_session_set_conditional_cache", "void", ["int64", "int"]),
+      httpcloak_session_get_conditional_cache: nativeLibHandle.func("httpcloak_session_get_conditional_cache", "int", ["int64"]),
+      httpcloak_session_set_follow_redirects: nativeLibHandle.func("httpcloak_session_set_follow_redirects", "void", ["int64", "int"]),
+      httpcloak_session_get_follow_redirects: nativeLibHandle.func("httpcloak_session_get_follow_redirects", "int", ["int64"]),
+      httpcloak_session_set_max_redirects: nativeLibHandle.func("httpcloak_session_set_max_redirects", "void", ["int64", "int"]),
+      httpcloak_session_get_max_redirects: nativeLibHandle.func("httpcloak_session_get_max_redirects", "int", ["int64"]),
       httpcloak_free_string: httpcloakFreeString,
       httpcloak_version: nativeLibHandle.func("httpcloak_version", HeapStr, []),
       httpcloak_available_presets: nativeLibHandle.func("httpcloak_available_presets", HeapStr, []),
@@ -1362,6 +1369,7 @@ class Session {
       enableSpeculativeTls = false,
       switchProtocol = null,
       withoutCookieJar = false,
+      withoutConditionalCache = false,
       ja3 = null,
       akamai = null,
       extraFp = null,
@@ -1438,6 +1446,9 @@ class Session {
     }
     if (withoutCookieJar) {
       config.without_cookie_jar = true;
+    }
+    if (withoutConditionalCache) {
+      config.without_conditional_cache = true;
     }
     if (ja3) {
       config.ja3 = ja3;
@@ -2101,6 +2112,73 @@ class Session {
    */
   get cookies() {
     return this.getCookies();
+  }
+
+  // ===========================================================================
+  // Conditional Cache and Redirect Runtime Control
+  // ===========================================================================
+
+  /**
+   * Drop the session's per-URL conditional-cache map (ETag / Last-Modified).
+   * The next request to each URL goes out without If-None-Match /
+   * If-Modified-Since headers. Cookies and TLS tickets are not touched.
+   */
+  clearCache() {
+    this._lib.httpcloak_session_clear_cache(this._handle);
+  }
+
+  /**
+   * Toggle the session's ETag / If-Modified-Since handling at runtime.
+   * When disabled, the session stops injecting cache validators on outgoing
+   * requests and stops storing them from responses; the existing cache map
+   * is preserved (re-enabling resumes using it). Pair with clearCache() to
+   * also wipe previously-stored validators.
+   * @param {boolean} enabled
+   */
+  setConditionalCache(enabled) {
+    this._lib.httpcloak_session_set_conditional_cache(this._handle, enabled ? 1 : 0);
+  }
+
+  /**
+   * Return the session's current conditional-cache state.
+   * @returns {boolean}
+   */
+  getConditionalCache() {
+    return this._lib.httpcloak_session_get_conditional_cache(this._handle) !== 0;
+  }
+
+  /**
+   * Toggle the session's redirect-following policy at runtime. The change
+   * takes effect on the next request and persists until set again.
+   * @param {boolean} enabled
+   */
+  setFollowRedirects(enabled) {
+    this._lib.httpcloak_session_set_follow_redirects(this._handle, enabled ? 1 : 0);
+  }
+
+  /**
+   * Return the session's current redirect-following policy.
+   * @returns {boolean}
+   */
+  getFollowRedirects() {
+    return this._lib.httpcloak_session_get_follow_redirects(this._handle) !== 0;
+  }
+
+  /**
+   * Update the session's redirect cap at runtime. Values of zero or below
+   * are ignored, leaving the prior cap (or the default of 10) in place.
+   * @param {number} max
+   */
+  setMaxRedirects(max) {
+    this._lib.httpcloak_session_set_max_redirects(this._handle, max);
+  }
+
+  /**
+   * Return the session's current redirect cap.
+   * @returns {number}
+   */
+  getMaxRedirects() {
+    return this._lib.httpcloak_session_get_max_redirects(this._handle);
   }
 
   // ===========================================================================

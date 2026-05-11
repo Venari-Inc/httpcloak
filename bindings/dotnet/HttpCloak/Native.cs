@@ -113,6 +113,27 @@ internal static class Native
     [DllImport(LibraryName, EntryPoint = "httpcloak_clear_cookies", CallingConvention = CallingConvention.Cdecl)]
     public static extern void ClearCookies(long handle);
 
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_clear_cache", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionClearCache(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_conditional_cache", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetConditionalCache(long handle, int enabled);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_conditional_cache", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetConditionalCache(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_follow_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetFollowRedirects(long handle, int enabled);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_follow_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetFollowRedirects(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_max_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetMaxRedirects(long handle, int max);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_max_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetMaxRedirects(long handle);
+
     [DllImport(LibraryName, EntryPoint = "httpcloak_free_string", CallingConvention = CallingConvention.Cdecl)]
     public static extern void FreeString(IntPtr str);
 
