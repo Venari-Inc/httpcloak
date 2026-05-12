@@ -328,6 +328,35 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Snapshot returned by `Session.stats()`. Mirrors the wire shape emitted by
+ * the Go-side `session.Stats()` after snake_case marshalling.
+ */
+export interface SessionStats {
+  /** Stable session ID assigned at construction. */
+  id: string;
+  /** Preset name the session was created with. */
+  preset: string;
+  /** Construction time, Unix nanoseconds. */
+  created_at: number;
+  /** Last-request time, Unix nanoseconds. */
+  last_used: number;
+  /** Total requests serviced by this session. */
+  request_count: number;
+  /** Whether the session is still usable (false after close). */
+  active: boolean;
+  /** Live cookie count in the jar. */
+  cookie_count: number;
+  /** Conditional-cache entry count (one per cached URL). */
+  cache_entry_count: number;
+  /** Age in nanoseconds (now - created_at). */
+  age_ns: number;
+  /** Idle time in nanoseconds (now - last_used). */
+  idle_time_ns: number;
+  /** Transport-level stats (per-protocol). Shape varies; treat as opaque. */
+  transport_stats?: Record<string, any>;
+}
+
 export class Session {
   constructor(options?: SessionOptions);
 
@@ -443,6 +472,31 @@ export class Session {
    * If-Modified-Since headers. Cookies and TLS tickets are not touched.
    */
   clearCache(): void;
+
+  /**
+   * Snapshot of session counters, timestamps and transport-level metrics.
+   * Mirrors the keys Go's session.Stats() returns, snake_case on the wire.
+   */
+  stats(): SessionStats;
+
+  /**
+   * Return the time since the session last serviced a request, in seconds.
+   * Returns -1 if the session handle is invalid.
+   */
+  idleTime(): number;
+
+  /**
+   * Return true if the session is still usable (close() has not been called
+   * and the handle is valid).
+   */
+  isActive(): boolean;
+
+  /**
+   * Reset the idle timer to now without issuing a request. Useful in
+   * long-running pools where an external heartbeat shouldn't let a session
+   * look idle to a reaper.
+   */
+  touch(): void;
 
   /**
    * Toggle the session's ETag / If-Modified-Since handling at runtime.

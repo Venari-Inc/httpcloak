@@ -1062,6 +1062,14 @@ def _setup_lib(lib):
     lib.httpcloak_clear_cookies.restype = None
     lib.httpcloak_session_clear_cache.argtypes = [c_int64]
     lib.httpcloak_session_clear_cache.restype = None
+    lib.httpcloak_session_stats.argtypes = [c_int64]
+    lib.httpcloak_session_stats.restype = c_void_p
+    lib.httpcloak_session_idle_time.argtypes = [c_int64]
+    lib.httpcloak_session_idle_time.restype = c_int64
+    lib.httpcloak_session_is_active.argtypes = [c_int64]
+    lib.httpcloak_session_is_active.restype = c_int
+    lib.httpcloak_session_touch.argtypes = [c_int64]
+    lib.httpcloak_session_touch.restype = None
     lib.httpcloak_session_set_conditional_cache.argtypes = [c_int64, c_int]
     lib.httpcloak_session_set_conditional_cache.restype = None
     lib.httpcloak_session_get_conditional_cache.argtypes = [c_int64]
@@ -2587,6 +2595,53 @@ class Session:
         If-Modified-Since headers. Cookies and TLS tickets are not touched.
         """
         self._lib.httpcloak_session_clear_cache(self._handle)
+
+    def stats(self) -> Dict[str, Any]:
+        """
+        Return a snapshot of session counters, timestamps, and transport-level
+        metrics. Keys: ``id``, ``preset``, ``created_at`` (Unix ns),
+        ``last_used`` (Unix ns), ``request_count``, ``active``,
+        ``cookie_count``, ``cache_entry_count``, ``age_ns``, ``idle_time_ns``,
+        ``transport_stats`` (per-protocol dict).
+
+        Useful for long-running scrapers that want per-session metrics
+        scraped into Prometheus / Datadog / etc.
+        """
+        result_ptr = self._lib.httpcloak_session_stats(self._handle)
+        if not result_ptr:
+            return {}
+        try:
+            raw = cast(result_ptr, c_char_p).value
+            if raw is None:
+                return {}
+            return json.loads(raw.decode("utf-8"))
+        finally:
+            self._lib.httpcloak_free_string(result_ptr)
+
+    def idle_time(self) -> float:
+        """
+        Return the time since the session last serviced a request, in seconds.
+        Returns -1.0 if the session handle is closed.
+        """
+        ns = self._lib.httpcloak_session_idle_time(self._handle)
+        if ns < 0:
+            return -1.0
+        return ns / 1_000_000_000.0
+
+    def is_active(self) -> bool:
+        """
+        Return True if the session is still usable (i.e. ``close()`` has not
+        been called and the handle is valid).
+        """
+        return self._lib.httpcloak_session_is_active(self._handle) == 1
+
+    def touch(self) -> None:
+        """
+        Reset the idle timer to now without issuing a request. Useful in
+        long-running pools where an external heartbeat shouldn't let a
+        session look idle to a reaper.
+        """
+        self._lib.httpcloak_session_touch(self._handle)
 
     def set_conditional_cache(self, enabled: bool) -> None:
         """

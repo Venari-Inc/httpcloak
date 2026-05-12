@@ -876,6 +876,10 @@ function getLib() {
       httpcloak_delete_cookie: nativeLibHandle.func("httpcloak_delete_cookie", "void", ["int64", "str", "str"]),
       httpcloak_clear_cookies: nativeLibHandle.func("httpcloak_clear_cookies", "void", ["int64"]),
       httpcloak_session_clear_cache: nativeLibHandle.func("httpcloak_session_clear_cache", "void", ["int64"]),
+      httpcloak_session_stats: nativeLibHandle.func("httpcloak_session_stats", HeapStr, ["int64"]),
+      httpcloak_session_idle_time: nativeLibHandle.func("httpcloak_session_idle_time", "int64", ["int64"]),
+      httpcloak_session_is_active: nativeLibHandle.func("httpcloak_session_is_active", "int", ["int64"]),
+      httpcloak_session_touch: nativeLibHandle.func("httpcloak_session_touch", "void", ["int64"]),
       httpcloak_session_set_conditional_cache: nativeLibHandle.func("httpcloak_session_set_conditional_cache", "void", ["int64", "int"]),
       httpcloak_session_get_conditional_cache: nativeLibHandle.func("httpcloak_session_get_conditional_cache", "int", ["int64"]),
       httpcloak_session_set_follow_redirects: nativeLibHandle.func("httpcloak_session_set_follow_redirects", "void", ["int64", "int"]),
@@ -2264,6 +2268,55 @@ class Session {
    */
   clearCache() {
     this._lib.httpcloak_session_clear_cache(this._handle);
+  }
+
+  /**
+   * Return a snapshot of session counters, timestamps and transport-level
+   * metrics. Useful for long-running scrapers that want per-session metrics
+   * scraped into Prometheus / Datadog / etc.
+   *
+   * Keys: id, preset, created_at (Unix ns), last_used (Unix ns),
+   * request_count, active, cookie_count, cache_entry_count, age_ns,
+   * idle_time_ns, transport_stats (per-protocol object).
+   *
+   * @returns {Object} Stats snapshot, or empty object if the session is closed.
+   */
+  stats() {
+    const ptr = this._lib.httpcloak_session_stats(this._handle);
+    const raw = resultToString(ptr);
+    if (!raw) return {};
+    try { return JSON.parse(raw); } catch { return {}; }
+  }
+
+  /**
+   * Return the time since the session last serviced a request, in seconds.
+   * Returns -1 if the session handle is invalid.
+   *
+   * @returns {number} Idle time in seconds (may be fractional).
+   */
+  idleTime() {
+    const ns = Number(this._lib.httpcloak_session_idle_time(this._handle));
+    if (ns < 0) return -1;
+    return ns / 1_000_000_000;
+  }
+
+  /**
+   * Return true if the session is still usable (close() has not been called
+   * and the handle is valid).
+   *
+   * @returns {boolean}
+   */
+  isActive() {
+    return this._lib.httpcloak_session_is_active(this._handle) === 1;
+  }
+
+  /**
+   * Reset the idle timer to now without issuing a request. Useful in
+   * long-running pools where an external heartbeat shouldn't let a session
+   * look idle to a reaper.
+   */
+  touch() {
+    this._lib.httpcloak_session_touch(this._handle);
   }
 
   /**

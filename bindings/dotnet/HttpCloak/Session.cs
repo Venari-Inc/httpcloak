@@ -1256,6 +1256,61 @@ public sealed class Session : IDisposable
     }
 
     /// <summary>
+    /// Snapshot of session counters, timestamps and transport-level metrics.
+    /// Useful for long-running scrapers that want per-session metrics scraped
+    /// into Prometheus / Datadog / etc. Returns null only if the session is
+    /// closed or the native lib returned an empty payload.
+    /// </summary>
+    public SessionStats? Stats()
+    {
+        ThrowIfDisposed();
+        IntPtr ptr = Native.SessionStats(_handle);
+        string? json = Native.PtrToStringAndFree(ptr);
+        if (string.IsNullOrEmpty(json)) return null;
+        try
+        {
+            return JsonSerializer.Deserialize(json, JsonContext.Default.SessionStats);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Return the time since the session last serviced a request.
+    /// Returns <see cref="TimeSpan.Zero"/> if the session handle is invalid.
+    /// </summary>
+    public TimeSpan IdleTime()
+    {
+        ThrowIfDisposed();
+        long ns = Native.SessionIdleTime(_handle);
+        if (ns < 0) return TimeSpan.Zero;
+        return TimeSpan.FromTicks(ns / 100);
+    }
+
+    /// <summary>
+    /// Return true if the session is still usable (Dispose has not run and
+    /// the handle is valid).
+    /// </summary>
+    public bool IsActive()
+    {
+        if (_disposed) return false;
+        return Native.SessionIsActive(_handle) == 1;
+    }
+
+    /// <summary>
+    /// Reset the idle timer to now without issuing a request. Useful in
+    /// long-running pools where an external heartbeat shouldn't let a session
+    /// look idle to a reaper.
+    /// </summary>
+    public void Touch()
+    {
+        ThrowIfDisposed();
+        Native.SessionTouch(_handle);
+    }
+
+    /// <summary>
     /// Toggle the session's ETag / If-Modified-Since handling at runtime.
     /// When disabled, the session stops injecting cache validators on outgoing
     /// requests and stops storing them from responses; the existing cache map
@@ -3481,6 +3536,64 @@ public sealed class HttpCloakHandler : DelegatingHandler
     }
 }
 
+/// <summary>
+/// Snapshot returned by <see cref="Session.Stats"/>. Mirrors the wire shape
+/// emitted by the Go-side <c>session.Stats()</c> after snake_case marshalling.
+/// All timestamps are Unix nanoseconds; durations are nanoseconds. Helper
+/// properties expose them as <see cref="DateTimeOffset"/> / <see cref="TimeSpan"/>.
+/// </summary>
+public sealed class SessionStats
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("preset")]
+    public string Preset { get; set; } = "";
+
+    [JsonPropertyName("created_at")]
+    public long CreatedAtNs { get; set; }
+
+    [JsonPropertyName("last_used")]
+    public long LastUsedNs { get; set; }
+
+    [JsonPropertyName("request_count")]
+    public long RequestCount { get; set; }
+
+    [JsonPropertyName("active")]
+    public bool Active { get; set; }
+
+    [JsonPropertyName("cookie_count")]
+    public int CookieCount { get; set; }
+
+    [JsonPropertyName("cache_entry_count")]
+    public int CacheEntryCount { get; set; }
+
+    [JsonPropertyName("age_ns")]
+    public long AgeNs { get; set; }
+
+    [JsonPropertyName("idle_time_ns")]
+    public long IdleTimeNs { get; set; }
+
+    [JsonPropertyName("transport_stats")]
+    public Dictionary<string, JsonElement>? TransportStats { get; set; }
+
+    /// <summary>Construction time as a UTC <see cref="DateTimeOffset"/>.</summary>
+    [JsonIgnore]
+    public DateTimeOffset CreatedAt => DateTimeOffset.FromUnixTimeMilliseconds(CreatedAtNs / 1_000_000);
+
+    /// <summary>Last-request time as a UTC <see cref="DateTimeOffset"/>.</summary>
+    [JsonIgnore]
+    public DateTimeOffset LastUsed => DateTimeOffset.FromUnixTimeMilliseconds(LastUsedNs / 1_000_000);
+
+    /// <summary>Session age as a <see cref="TimeSpan"/>.</summary>
+    [JsonIgnore]
+    public TimeSpan Age => TimeSpan.FromTicks(AgeNs / 100);
+
+    /// <summary>Idle time as a <see cref="TimeSpan"/>.</summary>
+    [JsonIgnore]
+    public TimeSpan IdleTimeSpan => TimeSpan.FromTicks(IdleTimeNs / 100);
+}
+
 [JsonSerializable(typeof(SessionConfig))]
 [JsonSerializable(typeof(RequestConfig))]
 [JsonSerializable(typeof(ResponseData))]
@@ -3498,6 +3611,7 @@ public sealed class HttpCloakHandler : DelegatingHandler
 [JsonSerializable(typeof(StreamMetadata))]
 [JsonSerializable(typeof(PresetInfo))]
 [JsonSerializable(typeof(Dictionary<string, PresetInfo>))]
+[JsonSerializable(typeof(SessionStats))]
 internal partial class JsonContext : JsonSerializerContext
 {
     /// <summary>

@@ -116,6 +116,18 @@ internal static class Native
     [DllImport(LibraryName, EntryPoint = "httpcloak_session_clear_cache", CallingConvention = CallingConvention.Cdecl)]
     public static extern void SessionClearCache(long handle);
 
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_stats", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr SessionStats(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_idle_time", CallingConvention = CallingConvention.Cdecl)]
+    public static extern long SessionIdleTime(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_is_active", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionIsActive(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_touch", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionTouch(long handle);
+
     [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_conditional_cache", CallingConvention = CallingConvention.Cdecl)]
     public static extern void SessionSetConditionalCache(long handle, int enabled);
 

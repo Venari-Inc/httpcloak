@@ -2133,6 +2133,78 @@ func httpcloak_session_clear_cache(handle C.int64_t) {
 	session.ClearCache()
 }
 
+//export httpcloak_session_stats
+// httpcloak_session_stats returns a JSON snapshot of the session's counters,
+// timestamps and transport-level stats. Caller owns the returned string and
+// must free it via httpcloak_free_string. Fields:
+//
+//	id, preset, created_at (unix ns), last_used (unix ns), request_count,
+//	active, cookie_count, cache_entry_count, age_ns, idle_time_ns,
+//	transport_stats (object).
+//
+// Returns nil if the session handle is invalid.
+func httpcloak_session_stats(handle C.int64_t) *C.char {
+	session := getSession(handle)
+	if session == nil {
+		return nil
+	}
+	stats := session.Stats()
+	payload := map[string]interface{}{
+		"id":                stats.ID,
+		"preset":            stats.Preset,
+		"created_at":        stats.CreatedAt.UnixNano(),
+		"last_used":         stats.LastUsed.UnixNano(),
+		"request_count":     stats.RequestCount,
+		"active":            stats.Active,
+		"cookie_count":      stats.CookieCount,
+		"cache_entry_count": stats.CacheEntryCount,
+		"age_ns":            int64(stats.Age),
+		"idle_time_ns":      int64(stats.IdleTime),
+		"transport_stats":   stats.TransportStats,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return C.CString(string(data))
+}
+
+//export httpcloak_session_idle_time
+// httpcloak_session_idle_time returns the time since the session last serviced
+// a request, in nanoseconds. Returns -1 if the session handle is invalid.
+func httpcloak_session_idle_time(handle C.int64_t) C.int64_t {
+	session := getSession(handle)
+	if session == nil {
+		return -1
+	}
+	return C.int64_t(session.IdleTime())
+}
+
+//export httpcloak_session_is_active
+// httpcloak_session_is_active returns 1 if the session is still usable (Close
+// has not run), 0 if closed or the handle is invalid.
+func httpcloak_session_is_active(handle C.int64_t) C.int {
+	session := getSession(handle)
+	if session == nil {
+		return 0
+	}
+	if session.IsActive() {
+		return 1
+	}
+	return 0
+}
+
+//export httpcloak_session_touch
+// httpcloak_session_touch resets the idle timer to now without issuing a
+// request. No-op if the handle is invalid.
+func httpcloak_session_touch(handle C.int64_t) {
+	session := getSession(handle)
+	if session == nil {
+		return
+	}
+	session.Touch()
+}
+
 //export httpcloak_session_set_conditional_cache
 func httpcloak_session_set_conditional_cache(handle C.int64_t, enabled C.int) {
 	session := getSession(handle)
