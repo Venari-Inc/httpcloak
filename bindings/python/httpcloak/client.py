@@ -972,6 +972,11 @@ class _AsyncCallbackManager:
 
         Each request gets a unique callback_id from Go. The callback function
         is shared but Go tracks each request separately by ID.
+
+        When the returned future is cancelled (e.g. via asyncio.wait_for timeout
+        or task.cancel()), the in-flight Go request is also cancelled — that
+        unblocks the goroutine, closes any pending DNS/TCP/TLS work, and stops
+        leaking work to the cgo side.
         """
         self._ensure_callback(lib)
 
@@ -984,6 +989,29 @@ class _AsyncCallbackManager:
         start_time = time.perf_counter()
         with self._lock:
             self._pending[callback_id] = (future, loop, start_time)
+
+        # Wire future cancellation through to the Go-side cancel function.
+        # add_done_callback fires for any future completion path; the cancel
+        # path is only meaningful while the request is still pending on the
+        # Go side. Order matters:
+        #   1) cancel_request unblocks the goroutine (ctx.Done fires)
+        #   2) unregister_callback removes the entry from Go's asyncCallbacks
+        #      map so the goroutine's final invokeCallback() finds !exists and
+        #      returns silently. Without this, Go would still try to deliver
+        #      a result via call_soon_threadsafe → set_exception on an already-
+        #      cancelled future, which raises InvalidStateError.
+        # Also drop the pending entry so a late callback delivery becomes a
+        # no-op on the Python side too.
+        def _on_future_done(fut: asyncio.Future, _cid: int = callback_id, _lib=lib, _self=self) -> None:
+            if fut.cancelled():
+                try:
+                    _lib.httpcloak_cancel_request(_cid)
+                    _lib.httpcloak_unregister_callback(_cid)
+                except Exception:
+                    pass
+                with _self._lock:
+                    _self._pending.pop(_cid, None)
+        future.add_done_callback(_on_future_done)
 
         return callback_id, future
 
@@ -1068,6 +1096,8 @@ def _setup_lib(lib):
     lib.httpcloak_post_async.restype = None
     lib.httpcloak_request_async.argtypes = [c_int64, c_char_p, c_int64]
     lib.httpcloak_request_async.restype = None
+    lib.httpcloak_cancel_request.argtypes = [c_int64]
+    lib.httpcloak_cancel_request.restype = None
 
     # Streaming functions
     lib.httpcloak_stream_get.argtypes = [c_int64, c_char_p, c_char_p]

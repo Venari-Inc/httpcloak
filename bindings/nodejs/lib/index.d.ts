@@ -312,6 +312,20 @@ export interface RequestOptions {
    * fresh fetch without touching the session-wide setting.
    */
   disableConditionalCache?: boolean;
+
+  /**
+   * AbortSignal for cancelling an in-flight request. Honored by the async
+   * methods (get, post, put, patch, delete, head, options, request). When
+   * the signal aborts, the underlying Go-side request is cancelled (DNS /
+   * TCP / TLS / HTTP work is torn down) and the returned promise rejects
+   * with the signal's reason (or a generic AbortError if none was set).
+   *
+   * @example
+   * const controller = new AbortController();
+   * setTimeout(() => controller.abort(new Error("too slow")), 5000);
+   * await session.get("https://slow.example.com", { signal: controller.signal });
+   */
+  signal?: AbortSignal;
 }
 
 export class Session {

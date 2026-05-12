@@ -894,6 +894,7 @@ function getLib() {
       httpcloak_get_async: nativeLibHandle.func("httpcloak_get_async", "void", ["int64", "str", "str", "int64"]),
       httpcloak_post_async: nativeLibHandle.func("httpcloak_post_async", "void", ["int64", "str", "str", "str", "int64"]),
       httpcloak_request_async: nativeLibHandle.func("httpcloak_request_async", "void", ["int64", "str", "int64"]),
+      httpcloak_cancel_request: nativeLibHandle.func("httpcloak_cancel_request", "void", ["int64"]),
       // Streaming functions
       httpcloak_stream_get: nativeLibHandle.func("httpcloak_stream_get", "int64", ["int64", "str", "str"]),
       httpcloak_stream_post: nativeLibHandle.func("httpcloak_stream_post", "int64", ["int64", "str", "str", "str"]),
@@ -1063,7 +1064,7 @@ class AsyncCallbackManager {
    * Register a new async request
    * @returns {{ callbackId: number, promise: Promise<Response> }}
    */
-  registerRequest(nativeLib) {
+  registerRequest(nativeLib, signal) {
     this._ensureCallback();
 
     // Register callback with Go (each request gets unique ID)
@@ -1079,6 +1080,43 @@ class AsyncCallbackManager {
 
     this._pendingRequests.set(Number(callbackId), { resolve, reject, startTime });
     this._ref(); // Keep event loop alive
+
+    // AbortSignal integration. If the caller supplies a signal that is
+    // already aborted, cancel synchronously; otherwise install a listener
+    // that fires once. Pre-aborted signals never deliver the "abort" event,
+    // so the explicit early-path matters.
+    //
+    // Order matters in onAbort:
+    //   1) cancel_request → unblocks the Go goroutine (ctx.Done fires)
+    //   2) unregister_callback → removes the entry from Go's asyncCallbacks
+    //      map so the goroutine's final invokeCallback() finds !exists and
+    //      returns silently. Without this, Go would still relay an error
+    //      callback through koffi after the JS side has already settled
+    //      and torn down its callback context, which crashes node with
+    //      "Error::ThrowAsJavaScriptException napi_throw" during exit.
+    if (signal && typeof signal === "object" && "aborted" in signal) {
+      const onAbort = () => {
+        const cid = Number(callbackId);
+        try {
+          nativeLib.httpcloak_cancel_request(cid);
+          nativeLib.httpcloak_unregister_callback(cid);
+        } catch {
+          // Best-effort: the request may have already settled.
+        }
+        const pending = this._pendingRequests.get(cid);
+        if (pending) {
+          this._pendingRequests.delete(cid);
+          this._unref();
+          const reason = signal.reason ?? new Error("AbortError");
+          pending.reject(reason);
+        }
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else if (typeof signal.addEventListener === "function") {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     return { callbackId, promise };
   }
@@ -1865,7 +1903,7 @@ class Session {
    * @returns {Promise<Response>} Response object
    */
   get(url, options = {}) {
-    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null, allowRedirects = null, disableConditionalCache = false } = options;
+    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null, allowRedirects = null, disableConditionalCache = false, signal = null } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
@@ -1898,7 +1936,7 @@ class Session {
 
     // Register async request with callback manager
     const manager = getAsyncManager();
-    const { callbackId, promise } = manager.registerRequest(this._lib);
+    const { callbackId, promise } = manager.registerRequest(this._lib, signal);
 
     // Start async request
     this._lib.httpcloak_get_async(this._handle, url, optionsJson, callbackId);
@@ -1914,7 +1952,7 @@ class Session {
    * @returns {Promise<Response>} Response object
    */
   post(url, options = {}) {
-    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null, allowRedirects = null, disableConditionalCache = false } = options;
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null, allowRedirects = null, disableConditionalCache = false, signal = null } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
@@ -1987,7 +2025,7 @@ class Session {
 
     // Register async request with callback manager
     const manager = getAsyncManager();
-    const { callbackId, promise } = manager.registerRequest(this._lib);
+    const { callbackId, promise } = manager.registerRequest(this._lib, signal);
 
     // Start async request
     this._lib.httpcloak_post_async(this._handle, url, body, optionsJson, callbackId);
@@ -2004,7 +2042,7 @@ class Session {
    * @returns {Promise<Response>} Response object
    */
   request(method, url, options = {}) {
-    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null, allowRedirects = null, disableConditionalCache = false } = options;
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null, allowRedirects = null, disableConditionalCache = false, signal = null } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
@@ -2065,7 +2103,7 @@ class Session {
 
     // Register async request with callback manager
     const manager = getAsyncManager();
-    const { callbackId, promise } = manager.registerRequest(this._lib);
+    const { callbackId, promise } = manager.registerRequest(this._lib, signal);
 
     // Start async request
     this._lib.httpcloak_request_async(this._handle, JSON.stringify(requestConfig), callbackId);
