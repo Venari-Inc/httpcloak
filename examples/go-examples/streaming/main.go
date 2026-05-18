@@ -266,7 +266,7 @@ RECOMMENDATIONS:
 	fmt.Println("\n" + strings.Repeat("=", 70))
 	fmt.Println("SUMMARY")
 	fmt.Println(strings.Repeat("=", 70))
-	fmt.Println(`
+	fmt.Print(`
 Streaming methods:
 - GetStream(ctx, url) - Start streaming GET request
 - stream.Read(buf) - Read into buffer (io.Reader interface)

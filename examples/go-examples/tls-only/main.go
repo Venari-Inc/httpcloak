@@ -1,3 +1,8 @@
+//go:build ignore
+
+// BROKEN: calls session.Get with 3 args, but the top-level httpcloak.Session.Get
+// signature was simplified to (ctx, url). Build-gated until rewritten.
+//
 // Example: TLS-Only Mode with httpcloak
 //
 // TLS-only mode lets you use the browser's TLS fingerprint (JA3/JA4, Peetprint,

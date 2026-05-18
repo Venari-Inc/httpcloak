@@ -205,7 +205,7 @@ func printSummary() {
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	fmt.Println("Summary: Custom Fingerprinting Options")
 	fmt.Println(strings.Repeat("=", 60))
-	fmt.Println(`
+	fmt.Print(`
 JA3 fingerprint (CustomFingerprint.JA3):
   - Overrides the TLS ClientHello fingerprint
   - Format: TLSVersion,Ciphers,Extensions,Curves,PointFormats
