@@ -111,7 +111,7 @@ func main() {
 	fmt.Println("Example 3: Local Address Binding")
 	fmt.Println(strings.Repeat("-", 60))
 
-	fmt.Println(`
+	fmt.Print(`
 Local address binding allows you to specify which local IP to use
 for outgoing connections. This is essential for IPv6 rotation scenarios.
 
@@ -157,7 +157,7 @@ Example with your machine's IPs:
 	fmt.Println("Example 4: Speculative TLS for Proxy Connections")
 	fmt.Println(strings.Repeat("-", 60))
 
-	fmt.Println(`
+	fmt.Print(`
 Speculative TLS (disabled by default):
 Sends CONNECT + TLS ClientHello together, saving one round-trip (~25% faster).
 Enable it if your proxy supports it and you want the extra speed:

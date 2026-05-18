@@ -79,7 +79,7 @@ func main() {
 	fmt.Println("Example 3: Split Proxy Configuration (TCP vs UDP)")
 	fmt.Println(strings.Repeat("-", 60))
 
-	fmt.Println(`
+	splitHelp := `
 // Use different proxies for HTTP/1.1+HTTP/2 (TCP) and HTTP/3 (UDP):
 
 c := client.NewClient("chrome-latest")
@@ -96,14 +96,15 @@ c.SetUDPProxy("socks5://udp-proxy.example.com:1080")
 
 fmt.Printf("TCP proxy: %s\n", c.GetTCPProxy())
 fmt.Printf("UDP proxy: %s\n", c.GetUDPProxy())
-`)
+`
+	fmt.Print(splitHelp)
 
 	// HTTP/3 proxy switching
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	fmt.Println("Example 4: HTTP/3 Proxy Switching")
 	fmt.Println(strings.Repeat("-", 60))
 
-	fmt.Println(`
+	h3Help := `
 // HTTP/3 requires special proxy support:
 // - SOCKS5 with UDP ASSOCIATE (most residential proxies)
 // - MASQUE (CONNECT-UDP) - premium providers like Bright Data, Oxylabs
@@ -124,14 +125,15 @@ fmt.Printf("Via SOCKS5: %s\n", resp.Protocol)
 c.SetUDPProxy("https://user:pass@brd.superproxy.io:10001")
 resp, _ = c.Get(ctx, "https://example.com", nil)
 fmt.Printf("Via MASQUE: %s\n", resp.Protocol)
-`)
+`
+	fmt.Print(h3Help)
 
 	// Proxy rotation pattern
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	fmt.Println("Example 5: Proxy Rotation Pattern")
 	fmt.Println(strings.Repeat("-", 60))
 
-	fmt.Println(`
+	rotateHelp := `
 // Rotate through multiple proxies without recreating clients:
 
 proxies := []string{
@@ -149,7 +151,8 @@ for i, proxy := range proxies {
     body, _ := resp.Text()
     fmt.Printf("Request %d via %s: IP = %s\n", i+1, proxy, body)
 }
-`)
+`
+	fmt.Print(rotateHelp)
 
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	fmt.Println("Proxy switching examples completed!")
