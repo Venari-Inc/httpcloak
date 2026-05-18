@@ -128,7 +128,7 @@ func main() {
 	fmt.Println("Example 3: Warmup + Fork (Recommended Pattern)")
 	fmt.Println(strings.Repeat("-", 60))
 
-	fmt.Println(`
+	helpText := `
 The recommended pattern for parallel scraping:
 
 1. Create one session
@@ -153,7 +153,8 @@ The recommended pattern for parallel scraping:
 All forks share the same TLS fingerprint, cookies, and TLS session
 cache (for 0-RTT resumption), but have independent TCP/QUIC connections.
 This looks exactly like a single browser with multiple tabs.
-`)
+`
+	fmt.Print(helpText)
 
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println("Warmup & Fork examples completed!")

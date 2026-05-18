@@ -1,3 +1,8 @@
+//go:build ignore
+
+// BROKEN: targets pre-1.6.6 API surface (httpcloak.WithHTTPVersion) that
+// no longer exists. Build-gated until rewritten against current API.
+//
 // Example: QUIC Idle Timeout Configuration
 //
 // This example demonstrates configuring QUIC idle timeout for HTTP/3 connections

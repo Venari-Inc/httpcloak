@@ -178,7 +178,7 @@ Streaming doesn't load the entire file into memory.`)
 	fmt.Println("\n" + strings.Repeat("=", 70))
 	fmt.Println("BEST PRACTICES SUMMARY")
 	fmt.Println(strings.Repeat("=", 70))
-	fmt.Println(`
+	fmt.Print(`
 1. Use Bytes()/Text()/JSON() for responses under 100MB
 2. Use GetStream() for large files or when memory is constrained
 3. Body is automatically decompressed (gzip, br, zstd)
