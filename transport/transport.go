@@ -807,6 +807,22 @@ func (t *Transport) Do(ctx context.Context, req *Request) (*Response, error) {
 		return nil, NewRequestError("parse_url", "", "", "", err)
 	}
 
+	// Establish ONE overall deadline for the whole request, covering any protocol
+	// fallback (H3 -> H2 -> H1). Each doHTTPx otherwise derives its own fresh
+	// WithTimeout(ctx, timeout), so without a shared parent deadline the per-attempt
+	// budgets ADD UP: a 4s timeout could ride to 8s (H2->H1) or 12s (H3->H2->H1).
+	// The per-request timeout wins over the session default; both are honored
+	// because context.WithTimeout takes the sooner of the parent deadline and this.
+	effectiveTimeout := t.timeout
+	if req.Timeout > 0 {
+		effectiveTimeout = req.Timeout
+	}
+	if effectiveTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, effectiveTimeout)
+		defer cancel()
+	}
+
 	// For HTTP (non-TLS), only HTTP/1.1 is supported
 	if parsedURL.Scheme == "http" {
 		return t.doHTTP1(ctx, req)

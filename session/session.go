@@ -175,6 +175,15 @@ func NewSessionWithOptions(id string, config *protocol.SessionConfig, opts *Sess
 	}
 	t = transport.NewTransportWithConfig(presetName, proxy, transportConfig)
 
+	// Wire the session timeout into the transport so it actually bounds requests
+	// (dial + proxy CONNECT + TLS handshake + response). Without this the
+	// transport stays on its 30s default and a stalled proxy ignores the
+	// session timeout entirely. config.Timeout is in seconds (see the writers in
+	// httpcloak.go and the cgo layer; the per-request override still wins).
+	if config.Timeout > 0 {
+		t.SetTimeout(time.Duration(config.Timeout) * time.Second)
+	}
+
 	// Disable TLS certificate verification if requested
 	if config.InsecureSkipVerify {
 		t.SetInsecureSkipVerify(true)

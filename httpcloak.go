@@ -843,6 +843,7 @@ func (s *Session) Do(ctx context.Context, req *Request) (*Response, error) {
 		TLSOnly:                 req.TLSOnly,
 		FollowRedirects:         req.FollowRedirects,
 		DisableConditionalCache: req.DisableConditionalCache,
+		Timeout:                 req.Timeout,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
@@ -886,6 +887,7 @@ func (s *Session) DoWithBody(ctx context.Context, req *Request, bodyReader io.Re
 		TLSOnly:                 req.TLSOnly,
 		FollowRedirects:         req.FollowRedirects,
 		DisableConditionalCache: req.DisableConditionalCache,
+		Timeout:                 req.Timeout,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
@@ -1197,6 +1199,7 @@ func (s *Session) DoStream(ctx context.Context, req *Request) (*StreamResponse, 
 		TLSOnly:                 req.TLSOnly,
 		FollowRedirects:         req.FollowRedirects,
 		DisableConditionalCache: req.DisableConditionalCache,
+		Timeout:                 req.Timeout,
 	}
 
 	resp, err := s.inner.RequestStream(ctx, sReq)
