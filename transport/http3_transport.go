@@ -211,6 +211,13 @@ type HTTP3Transport struct {
 	// PSK variant for inner MASQUE connections
 	cachedClientHelloSpecInnerPSK *utls.ClientHelloSpec
 
+	// Resolved ClientHelloID (QUIC-specific, or TCP fallback). Used to regenerate
+	// a FRESH ClientHelloSpec per dial. utls ApplyPreset mutates the spec in place
+	// (KeyShares.Data, GREASE), so sharing one cached spec across concurrent QUIC
+	// dials is a data race; each dial gets its own spec generated from this ID +
+	// shuffleSeed, which keeps extension order (and thus JA3/JA4) byte-stable.
+	clientHelloID *utls.ClientHelloID
+
 	// Shuffle seed for TLS and transport parameter ordering (consistent per session)
 	shuffleSeed int64
 
@@ -286,26 +293,45 @@ func (t *HTTP3Transport) hasSessionForHost(host string) bool {
 	return found
 }
 
-// getSpecForHost returns the appropriate ClientHelloSpec for consistent TLS fingerprint
-// Only use PSK spec (which includes early_data extension) when there's an actual session to resume.
-// Chrome does NOT send early_data extension on fresh connections - only on resumption.
+// getSpecForHost returns a FRESH ClientHelloSpec for this dial. utls ApplyPreset
+// (and quic-go's GREASE write-back) mutate the spec in place, so handing the same
+// cached spec to concurrent QUIC dials is a data race. We regenerate per call from
+// the stored ClientHelloID + shuffleSeed: the seed makes the extension order (and
+// therefore JA3/JA4) byte-identical every time, while each connection mutates its
+// own private spec. This mirrors the HTTP/2 transport, which is already race-clean.
+//
+// The PSK variant (which carries the early_data + pre_shared_key extensions) is
+// used only when there is a cached session to resume; Chrome does not send
+// early_data on a fresh connection.
 func (t *HTTP3Transport) getSpecForHost(host string) *utls.ClientHelloSpec {
-	// Only use PSK spec when there's a cached session for this host
-	// This matches Chrome's behavior: no early_data on fresh connections
-	if t.cachedClientHelloSpecPSK != nil && t.hasSessionForHost(host) {
-		return t.cachedClientHelloSpecPSK
+	if t.preset.QUICPSKClientHelloID.Client != "" && t.hasSessionForHost(host) {
+		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.QUICPSKClientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
 	}
-	return t.cachedClientHelloSpec
+	if t.clientHelloID != nil {
+		if spec, err := utls.UTLSIdToSpecWithSeed(*t.clientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
+	}
+	return nil
 }
 
-// getInnerSpecForHost returns the appropriate inner ClientHelloSpec for MASQUE connections
-// Only use PSK spec when there's an actual session to resume.
+// getInnerSpecForHost is the inner-MASQUE counterpart of getSpecForHost. Same
+// fresh-per-dial regeneration so concurrent MASQUE inner dials never share a spec;
+// kept a separate object from the outer connection for a consistent inner JA4.
 func (t *HTTP3Transport) getInnerSpecForHost(host string) *utls.ClientHelloSpec {
-	// Only use PSK spec when there's a cached session for this host
-	if t.cachedClientHelloSpecInnerPSK != nil && t.hasSessionForHost(host) {
-		return t.cachedClientHelloSpecInnerPSK
+	if t.preset.QUICPSKClientHelloID.Client != "" && t.hasSessionForHost(host) {
+		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.QUICPSKClientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
 	}
-	return t.cachedClientHelloSpecInner
+	if t.clientHelloID != nil {
+		if spec, err := utls.UTLSIdToSpecWithSeed(*t.clientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
+	}
+	return nil
 }
 
 // NewHTTP3Transport creates a new HTTP/3 transport
@@ -352,6 +378,7 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 		// Fallback to TCP ClientHello if no QUIC-specific one
 		clientHelloID = &preset.ClientHelloID
 	}
+	t.clientHelloID = clientHelloID // stored for fresh-spec-per-dial regeneration
 
 	// Cache the ClientHelloSpec for consistent TLS fingerprint across connections
 	// Chrome shuffles TLS extensions once per session, not per connection
@@ -508,6 +535,8 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		clientHelloID = &preset.ClientHelloID
 	}
 
+	t.clientHelloID = clientHelloID // stored for fresh-spec-per-dial regeneration
+
 	// Cache ClientHelloSpec for consistent fingerprint
 	if clientHelloID != nil {
 		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
@@ -630,6 +659,8 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 		clientHelloID = &preset.ClientHelloID
 	}
 
+	t.clientHelloID = clientHelloID // stored for fresh-spec-per-dial regeneration
+
 	// Cache ClientHelloSpec for consistent fingerprint (outer connection to proxy)
 	if clientHelloID != nil {
 		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
@@ -727,9 +758,13 @@ func (t *HTTP3Transport) dialQUICWithMASQUE(ctx context.Context, addr string, tl
 		return nil, fmt.Errorf("invalid port: %w", err)
 	}
 
-	// Establish MASQUE tunnel with Chrome fingerprinting
-	// Use the preset's TLS/QUIC config for the proxy connection too
-	err = t.masqueConn.EstablishWithQUICConfig(ctx, connectHost, portInt, t.tlsConfig, t.quicConfig)
+	// Establish MASQUE tunnel with Chrome fingerprinting.
+	// Clone the config and hand the outer establish its own fresh ClientHelloSpec
+	// (rather than the shared t.quicConfig base) so a concurrent first-use of the
+	// tunnel can't race-mutate one spec via ApplyPreset.
+	masqueCfg := t.quicConfig.Clone()
+	masqueCfg.CachedClientHelloSpec = t.getSpecForHost(connectHost)
+	err = t.masqueConn.EstablishWithQUICConfig(ctx, connectHost, portInt, t.tlsConfig, masqueCfg)
 	if err != nil {
 		return nil, fmt.Errorf("MASQUE tunnel establishment failed: %w", err)
 	}
@@ -1612,6 +1647,10 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 
 	// Build QUIC config from preset getters (same fingerprint as real connections)
 	quicCfg := t.buildQUICConfig(clientHelloID, quicIdleTimeout, 0)
+	// buildQUICConfig embeds the shared base spec; concurrent probes would
+	// race-mutate it via ApplyPreset. Hand this probe its own fresh spec
+	// (same seed -> identical fingerprint, private object -> no race).
+	quicCfg.CachedClientHelloSpec = t.getSpecForHost(host)
 	if len(echConfigList) > 0 {
 		quicCfg.ECHConfigList = echConfigList
 	}
