@@ -1541,6 +1541,30 @@ func (s *Session) PostStream(ctx context.Context, url string, body []byte, heade
 // parseOrigin returns (scheme, host, port) for origin comparison. Missing
 // ports are filled in with the scheme default so http://x:80 and http://x
 // compare equal. Returned values are lowercased.
+// sameOriginReferer returns the previous URL as Chrome puts it in the Referer
+// header on a same-origin hop: the full URL minus the fragment and any userinfo
+// (credentials), with a redundant default port dropped. Chrome never leaks the
+// fragment or credentials in Referer, and serializes the document URL with the
+// default port omitted (https://h:443/a -> https://h/a).
+func sameOriginReferer(prevURL string) string {
+	u, err := url.Parse(prevURL)
+	if err != nil {
+		return ""
+	}
+	u.Fragment = ""
+	u.RawFragment = ""
+	u.User = nil
+	scheme := strings.ToLower(u.Scheme)
+	if p := u.Port(); (scheme == "https" && p == "443") || (scheme == "http" && p == "80") {
+		host := u.Hostname()
+		if strings.Contains(host, ":") { // IPv6 literal needs brackets
+			host = "[" + host + "]"
+		}
+		u.Host = host
+	}
+	return u.String()
+}
+
 func parseOrigin(urlStr string) (scheme, host, port string) {
 	u, err := url.Parse(urlStr)
 	if err != nil || u.Scheme == "" {
@@ -1572,7 +1596,7 @@ func redirectReferer(prevURL string, schemeDowngrade, crossOrigin bool) string {
 		return ""
 	}
 	if !crossOrigin {
-		return prevURL
+		return sameOriginReferer(prevURL)
 	}
 	scheme, host, port := parseOrigin(prevURL)
 	if scheme == "" || host == "" {

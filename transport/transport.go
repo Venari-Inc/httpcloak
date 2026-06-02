@@ -831,13 +831,14 @@ func (t *Transport) Do(ctx context.Context, req *Request) (*Response, error) {
 	// When proxy is configured, respect user's protocol choice
 	// Check for any proxy (URL, TCPProxy, or UDPProxy)
 	if t.proxy != nil && (t.proxy.URL != "" || t.proxy.TCPProxy != "" || t.proxy.UDPProxy != "") {
-		// Get effective proxy URL for protocol detection
-		effectiveProxyURL := t.proxy.URL
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = t.proxy.TCPProxy
-		}
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = t.proxy.UDPProxy
+		// QUIC capability is decided by the UDP-side proxy, matching how the H3
+		// transport is built (UDPProxy, else the unified URL). A TCP-only proxy
+		// never relays QUIC, and for a split config (TCPProxy=http,
+		// UDPProxy=socks5) keying off the TCP proxy would hide a perfectly good
+		// H3-over-proxy transport.
+		udpEffectiveProxyURL := t.proxy.UDPProxy
+		if udpEffectiveProxyURL == "" {
+			udpEffectiveProxyURL = t.proxy.URL
 		}
 
 		// Respect user's explicit protocol choice
@@ -853,7 +854,7 @@ func (t *Transport) Do(ctx context.Context, req *Request) (*Response, error) {
 			if t.h3ProxyError != nil {
 				return nil, t.h3ProxyError
 			}
-			if !SupportsQUIC(effectiveProxyURL) {
+			if !SupportsQUIC(udpEffectiveProxyURL) {
 				return nil, fmt.Errorf("HTTP/3 requires a SOCKS5 or MASQUE proxy (current proxy does not support UDP)")
 			}
 			return t.doHTTP3(ctx, req)
@@ -874,7 +875,7 @@ func (t *Transport) Do(ctx context.Context, req *Request) (*Response, error) {
 				return t.doHTTP1(ctx, req)
 			}
 
-			if SupportsQUIC(effectiveProxyURL) {
+			if SupportsQUIC(udpEffectiveProxyURL) {
 				// SOCKS5 or MASQUE proxy. Race H3 and H2 instead of trying H3
 				// first: when QUIC cannot actually relay through the proxy, the
 				// sequential path idles ~5s on the QUIC handshake before falling

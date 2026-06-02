@@ -161,8 +161,15 @@ func (t *Transport) doStreamAuto(ctx context.Context, req *Request) (*StreamResp
 	if ok {
 		switch known {
 		case ProtocolHTTP3:
-			if resp, err := t.doStreamHTTP3(ctx, req); err == nil {
+			resp, err := t.doStreamHTTP3(ctx, req)
+			if err == nil {
 				return resp, nil
+			}
+			if req.BodyReader != nil {
+				// A one-shot BodyReader may have been partially drained by the
+				// H3 attempt; re-sending it on H2 would corrupt the body. Surface
+				// the H3 error instead of silently sending a truncated request.
+				return nil, err
 			}
 			return t.doStreamHTTP2(ctx, req)
 		case ProtocolHTTP2, ProtocolHTTP1:
@@ -185,11 +192,16 @@ func (t *Transport) doStreamAuto(ctx context.Context, req *Request) (*StreamResp
 			// the H2 attempt below negotiate on its own.
 			decision.alpnErr.TLSConn.Close()
 		case decision.protocol == ProtocolHTTP3:
-			if resp, err := t.doStreamHTTP3(ctx, req); err == nil {
+			resp, err := t.doStreamHTTP3(ctx, req)
+			if err == nil {
 				t.cacheProtocol(host, ProtocolHTTP3)
 				return resp, nil
 			}
-			// H3 lost after winning the probe; fall through to H2.
+			if req.BodyReader != nil {
+				// One-shot body may be drained; do not re-send on H2 (see above).
+				return nil, err
+			}
+			// Replayable body (or none): fall through to H2.
 		}
 	}
 
