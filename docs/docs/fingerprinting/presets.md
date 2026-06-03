@@ -30,11 +30,11 @@ Pick one by name, send a request, the wire bytes match the real browser.
 
 ### Chrome
 
-Versions 133, 141, 143, 144, 145, 146, 147, 148. The 143-148 line ships per-OS variants; 133 and 141 are desktop-only single presets without per-OS suffixes. Layout for the per-OS line (using 148 as the example):
+Versions 133, 141, 143, 144, 145, 146, 147, 148, 149. The 143-148 line ships per-OS variants; 133 and 141 are desktop-only single presets without per-OS suffixes. Chrome 149 is desktop-only for now (no mobile capture yet). Layout for the per-OS line (using 148 as the example):
 
 | Family | Variants |
 |---|---|
-| Desktop | `chrome-148`, `chrome-148-windows`, `chrome-148-linux`, `chrome-148-macos` |
+| Desktop | `chrome-148`, `chrome-148-windows`, `chrome-148-linux`, `chrome-148-macos`, `chrome-149`, `chrome-149-windows`, `chrome-149-linux`, `chrome-149-macos` |
 | Android | `chrome-148-android` (alias: `android-chrome-148`) |
 | iOS     | `chrome-148-ios` (alias: `ios-chrome-148`) |
 
@@ -45,15 +45,15 @@ Bare `chrome-148` resolves to the host OS at runtime via `runtime.GOOS`. On a Li
 Aliases that auto-track the newest shipped Chrome:
 
 ```
-chrome-latest          → chrome-148
-chrome-latest-windows  → chrome-148-windows
-chrome-latest-linux    → chrome-148-linux
-chrome-latest-macos    → chrome-148-macos
+chrome-latest          → chrome-149
+chrome-latest-windows  → chrome-149-windows
+chrome-latest-linux    → chrome-149-linux
+chrome-latest-macos    → chrome-149-macos
 chrome-latest-android  → chrome-148-android
 chrome-latest-ios      → chrome-148-ios
 ```
 
-When Chrome 149 ships, those aliases bump in lockstep. Code on `chrome-latest` keeps rolling, and code that pinned `chrome-148-windows` stays on the same fingerprint.
+Chrome 149 has shipped, so the desktop -latest aliases now resolve to 149, while the mobile aliases stay on 148 until a 149 mobile capture lands. Code on `chrome-latest` keeps rolling, and code that pinned `chrome-148-windows` stays on the same fingerprint.
 
 ### Firefox
 

@@ -119,7 +119,7 @@ Task<Response> PostMultipartAsync(string url, Dictionary<string,string>? fields 
 Task WarmupAsync(string url, long timeoutMs = 0, ...);
 ```
 
-`PostAsync(byte[])` and the binary overload family route through the base64-encoded body path so NUL bytes and non-UTF-8 sequences survive the cgo boundary intact. The Stream overloads read the entire stream into memory before sending; for very large uploads (>50 MB) prefer the chunked upload API once it ships in .NET.
+`PostAsync(byte[])` and the binary overload family route through the base64-encoded body path so NUL bytes and non-UTF-8 sequences survive the cgo boundary intact. The Stream overloads read the entire stream into memory before sending; for very large uploads (>50 MB) prefer the chunked upload API `UploadStream(string method, string url, IEnumerable<byte[]> chunks, ...)` (or the `PostUpload(string url, IEnumerable<byte[]> chunks, ...)` convenience wrapper), which streams each chunk straight across the cgo boundary instead of buffering the whole body.
 
 ### Sync variants
 

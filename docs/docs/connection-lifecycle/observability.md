@@ -154,7 +154,7 @@ Don't reach for `GetTransport()` unless you've read `transport/transport.go` and
 
 ## Bindings
 
-Most of the methods in this chapter are Go-only at the moment. The bindings expose `SetSessionIdentifier` (which the LocalProxy registry depends on) and `LocalProxy.Stats()` for proxy-level inspection, but Session-level observability hasn't been wired through.
+Every Session-level observability method in this chapter is exposed in Python, Node, and .NET, with `GetTransport` as the one exception (Go-only by design). `Stats`, `IdleTime`, `IsActive`, `Touch`, `ClearCache`, and `SetSessionIdentifier` all map straight through cgo, and `LocalProxy.GetStats()` covers proxy-level inspection on top of that.
 
 | Go method | Python | Node.js | .NET |
 | --- | --- | --- | --- |
@@ -166,6 +166,4 @@ Most of the methods in this chapter are Go-only at the moment. The bindings expo
 | `SetSessionIdentifier(id)` | `session.set_session_identifier(id)` | `session.setSessionIdentifier(id)` | `Session.SetSessionIdentifier(id)` |
 | `GetTransport() *transport.Transport` | not exposed (Go-only by design) | not exposed (Go-only by design) | not exposed (Go-only by design) |
 
-`LocalProxy` does expose stats on every binding (`local_proxy.get_stats()` in Python, `localProxy.getStats()` in Node, `LocalProxy.GetStats()` in .NET), so proxy-level counters work cross-language. Session-level inspection from a binding is currently a workaround pattern: read counters in the binding's own application layer, persist via `Save()`/`Marshal()` for cross-process visibility, or run a small Go-side service that holds the sessions and exposes counters over an HTTP endpoint your binding can hit.
-
-If your use case needs Session-level `Stats()` from a binding directly, file an issue on GitHub. The Go surface already exists; wiring it through cgo is mechanical work, not a research problem.
+`LocalProxy` also exposes its own stats on every binding (`local_proxy.get_stats()` in Python, `localProxy.getStats()` in Node, `LocalProxy.GetStats()` in .NET), so proxy-level counters work cross-language alongside the Session-level methods above. For cross-process visibility you can still persist a session via `Save()`/`Marshal()` and read its counters back after a restart.

@@ -91,6 +91,8 @@ httpcloak.Session(
     enable_speculative_tls: bool = False,
     switch_protocol: Optional[str] = None,
     without_cookie_jar: bool = False,
+    without_conditional_cache: bool = False,
+    disable_http3: bool = False,
     ja3: Optional[str] = None,
     akamai: Optional[str] = None,
     extra_fp: Optional[Dict[str, Any]] = None,

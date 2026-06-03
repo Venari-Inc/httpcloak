@@ -2,7 +2,7 @@
 
 > Go HTTP client library that emits TLS, HTTP/2, and HTTP/3 wire bytes byte-identical to real Chrome / Firefox / Safari handshakes. Bindings ship for Go, Python, Node.js, and .NET via a shared cgo library.
 
-httpcloak handles uTLS-backed TLS fingerprinting, HTTP/1.1, HTTP/2 with akamai-style fingerprinting, HTTP/3 over QUIC, proxy support (HTTP CONNECT, SOCKS5 with optional UDP, MASQUE), per-resource RFC 7540 / RFC 9218 stream priorities, ECH (Encrypted Client Hello), and a full preset registry covering Chrome 133-148, Firefox 133/148, Safari 17/18 and their per-OS variants. The JSON preset builder lets you describe a built-in preset, mutate the JSON, and load it back as a custom registration without rebuilding.
+httpcloak handles uTLS-backed TLS fingerprinting, HTTP/1.1, HTTP/2 with akamai-style fingerprinting, HTTP/3 over QUIC, proxy support (HTTP CONNECT, SOCKS5 with optional UDP, MASQUE), per-resource RFC 7540 / RFC 9218 stream priorities, ECH (Encrypted Client Hello), and a full preset registry covering Chrome 133-149, Firefox 133/148, Safari 17/18 and their per-OS variants. The JSON preset builder lets you describe a built-in preset, mutate the JSON, and load it back as a custom registration without rebuilding.
 
 ## Getting Started
 

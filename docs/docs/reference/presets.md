@@ -21,10 +21,10 @@ The `-latest` aliases point to the newest tracked version. They're not separate 
 
 | Alias | Resolves to |
 |---|---|
-| `chrome-latest` | `chrome-148` (auto-detects host OS) |
-| `chrome-latest-windows` | `chrome-148-windows` |
-| `chrome-latest-linux` | `chrome-148-linux` |
-| `chrome-latest-macos` | `chrome-148-macos` |
+| `chrome-latest` | `chrome-149` (auto-detects host OS) |
+| `chrome-latest-windows` | `chrome-149-windows` |
+| `chrome-latest-linux` | `chrome-149-linux` |
+| `chrome-latest-macos` | `chrome-149-macos` |
 | `chrome-latest-ios` | `chrome-148-ios` |
 | `chrome-latest-android` | `chrome-148-android` |
 | `firefox-latest` | `firefox-148` |
@@ -44,7 +44,8 @@ Captured from the Linux build host on `2026-05-10` via `NewSession(preset).Get(c
 
 | Preset | Protocol | JA3 hash | JA4 | Akamai HTTP/2 hash | PeetPrint |
 |---|---|---|---|---|---|
-| `chrome-latest` (resolves to `chrome-148-linux`) | h2 | `51c8a5ff78d815668581664c5789d09c` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `52d84b11737d980aef856699f885ca86` | `1d4ffe9b0e34acac0bd883fa7f79d7b5` |
+| `chrome-latest` (resolves to `chrome-149-linux`) | h2 | `51c8a5ff78d815668581664c5789d09c` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `52d84b11737d980aef856699f885ca86` | `1d4ffe9b0e34acac0bd883fa7f79d7b5` |
+| `chrome-149-windows` | h2 | `f592f2dfba4cdfc1b18ed1f29df8c8b7` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `52d84b11737d980aef856699f885ca86` | `1d4ffe9b0e34acac0bd883fa7f79d7b5` |
 | `chrome-148-windows` | h2 | `f592f2dfba4cdfc1b18ed1f29df8c8b7` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `52d84b11737d980aef856699f885ca86` | `1d4ffe9b0e34acac0bd883fa7f79d7b5` |
 | `firefox-148` | h2 | `6f7889b9fb1a62a9577e685c1fcfa919` | `t13d1717h2_5b57614c22b0_3cbfd9057e0d` | `6ea73faa8fc5aac76bded7bd238f6433` | `89d89662b21018947a9a46658c4f5ede` |
 | `safari-18` | h2 | `c8af4d593e65bd6ba927ef9a0bdef541` | `t13d2013h2_a09f3c656075_7f0f34a4126d` | `90d8353e47699c4c38ecd773e9b5a089` | `62b834de729e78a9f0ebd1dd099314a7` |
@@ -61,10 +62,13 @@ For any preset not listed, run the same capture yourself. The static parts (UA, 
 
 ## Chrome desktop
 
-The Chrome desktop family. Versions 143 through 146 are Go-defined in `fingerprint/presets.go`. Versions 147 and 148 ship as JSON in `fingerprint/embedded/`, inheriting from 146 and 147 respectively with just the User-Agent and `sec-ch-ua` brand list bumped.
+The Chrome desktop family. Versions 143 through 146 are Go-defined in `fingerprint/presets.go`. Versions 147, 148, and 149 ship as JSON in `fingerprint/embedded/`, inheriting from 146, 147, and 148 respectively with just the User-Agent and `sec-ch-ua` brand list bumped.
 
 | Preset | UA | `sec-ch-ua` | Notes |
 |---|---|---|---|
+| `chrome-149-windows` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36` | `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"` | Inherits TLS from `chrome-148-windows`. |
+| `chrome-149-linux` | `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36` | `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"` | Inherits TLS from `chrome-148-linux`. |
+| `chrome-149-macos` | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36` | `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"` | Inherits TLS from `chrome-148-macos`. |
 | `chrome-148-windows` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36` | `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` | Inherits TLS from `chrome-147-windows`. |
 | `chrome-148-linux` | `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36` | `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` | Inherits TLS from `chrome-147-linux`. |
 | `chrome-148-macos` | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36` | `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` | Inherits TLS from `chrome-147-macos`. |
@@ -80,7 +84,7 @@ The Chrome desktop family. Versions 143 through 146 are Go-defined in `fingerpri
 | `chrome-141` | `...Chrome/141.0.0.0...` | matching brand list | Legacy preset, no per-OS variants, no QUIC fingerprint (H1/H2 only). |
 | `chrome-133` | `...Chrome/133.0.0.0...` | matching brand list | Legacy preset, no per-OS variants, no QUIC fingerprint (H1/H2 only). |
 
-The unsuffixed `chrome-148` / `chrome-147` / `chrome-146` / `chrome-145` / `chrome-144` / `chrome-143` resolve at runtime to whichever platform-suffixed variant matches the host OS. Pick the suffix when you want consistent results across machines.
+The unsuffixed `chrome-149` / `chrome-148` / `chrome-147` / `chrome-146` / `chrome-145` / `chrome-144` / `chrome-143` resolve at runtime to whichever platform-suffixed variant matches the host OS. Pick the suffix when you want consistent results across machines.
 
 The 143-and-newer Chrome desktop line:
 

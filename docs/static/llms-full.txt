@@ -130,13 +130,15 @@ Console.WriteLine(resp.StatusCode);
 
 ### Presets
 
-- **Chrome**: 133, 141, 143, 144, 145, 146, 147, 148, with per-OS variants
-  (Windows / Linux / macOS / Android / iOS) where they actually differ.
+- **Chrome**: 133, 141, 143, 144, 145, 146, 147, 148, 149, with per-OS variants
+  (Windows / Linux / macOS / Android / iOS) where they actually differ. Desktop
+  reaches 149; Android / iOS top out at 148 for now.
 - **Firefox**: 133, 148.
 - **Safari**: 18 (desktop), 17 / 18 (iOS).
 - **`chrome-latest` aliases**: `chrome-latest`, `chrome-latest-windows`,
-  `chrome-latest-linux`, `chrome-latest-macos`, `chrome-latest-android`,
-  `chrome-latest-ios`. Auto-track the newest shipped Chrome major.
+  `chrome-latest-linux`, `chrome-latest-macos` track the newest shipped
+  desktop Chrome (149). `chrome-latest-android` and `chrome-latest-ios`
+  stay on 148 until a 149 mobile capture lands.
 
 ### Bindings
 
@@ -430,7 +432,7 @@ using var old     = new Session(preset: "chrome-144-windows");
 
 Every preset family ships per-OS variants wherever the underlying browser actually differs by OS. Chrome differs across Windows, Linux, macOS, Android, and iOS (iOS Chrome is WebKit under the hood, totally different stack). Firefox barely differs across desktop OSes, so there's one desktop build.
 
-**Chrome desktop**: 133, 141, 143, 144, 145, 146, 147, 148. Each has `-windows`, `-linux`, `-macos` suffixes (so `chrome-148-windows` and friends). Bare `chrome-148` aliases to whatever OS the library defaults to.
+**Chrome desktop**: 133, 141, 143, 144, 145, 146, 147, 148, 149. Each has `-windows`, `-linux`, `-macos` suffixes (so `chrome-149-windows` and friends). Bare `chrome-149` aliases to whatever OS the library defaults to.
 
 **Chrome mobile**: `chrome-143-android` through `chrome-148-android`, and `chrome-143-ios` through `chrome-148-ios`. Mobile Chrome has its own UA, its own sec-ch-ua values, and on iOS a completely different TLS stack (WebKit again).
 
@@ -2521,15 +2523,15 @@ Bare `chrome-148` resolves to the host OS at runtime via `runtime.GOOS`. So on a
 Aliases that auto-track the newest shipped Chrome:
 
 ```
-chrome-latest          → chrome-148
-chrome-latest-windows  → chrome-148-windows
-chrome-latest-linux    → chrome-148-linux
-chrome-latest-macos    → chrome-148-macos
+chrome-latest          → chrome-149
+chrome-latest-windows  → chrome-149-windows
+chrome-latest-linux    → chrome-149-linux
+chrome-latest-macos    → chrome-149-macos
 chrome-latest-android  → chrome-148-android
 chrome-latest-ios      → chrome-148-ios
 ```
 
-When Chrome 149 ships, those aliases bump in lockstep. Code on `chrome-latest` keeps rolling. Code that pinned `chrome-148-windows` stays on the same fingerprint.
+Desktop `chrome-latest` now rolls on 149. Mobile (`chrome-latest-android` / `chrome-latest-ios`) stays on 148 until a 149 mobile capture lands. When the next major ships, the desktop aliases bump in lockstep. Code on `chrome-latest` keeps rolling. Code that pinned `chrome-149-windows` stays on the same fingerprint.
 
 ### Firefox
 
@@ -2715,7 +2717,7 @@ What this means for you: describe, edit, load, describe, diff. The diff shows ex
 
 ## Use cases
 
-- **Spoof a Chrome version we haven't shipped yet.** Grab `chrome-latest`, override the User-Agent and sec-ch-ua brand list, register as `chrome-149-windows`. Five minutes.
+- **Spoof a Chrome version we haven't shipped yet.** Grab `chrome-latest`, override the User-Agent and sec-ch-ua brand list, register as `chrome-150-windows`. Five minutes.
 - **Pin a UA OS that doesn't match your runtime.** A Linux box can ship the `chrome-148-windows` UA without touching the TLS handshake.
 - **Remove or add a single TLS extension.** Override `tls.signature_algorithms` or `tls.alpn` without rebuilding the whole ClientHello.
 - **Tweak one HTTP/2 SETTINGS value.** Bump `initial_window_size`, leave everything else alone.
@@ -6279,7 +6281,7 @@ DevTools won't show you header order, so you're flying blind there. Hit [tls.pee
 
 ## What ships by default
 
-Every preset carries its own browser header set. For `chrome-148-linux` (today's default), the request goes out as:
+Every preset carries its own browser header set. For `chrome-148-linux`, the request goes out as:
 
 | Position | Header | Example value |
 |---|---|---|
@@ -9495,10 +9497,10 @@ The `-latest` aliases follow the newest version we track. Not separate fingerpri
 
 | Alias | Resolves to |
 |---|---|
-| `chrome-latest` | `chrome-148` (auto-detects host OS) |
-| `chrome-latest-windows` | `chrome-148-windows` |
-| `chrome-latest-linux` | `chrome-148-linux` |
-| `chrome-latest-macos` | `chrome-148-macos` |
+| `chrome-latest` | `chrome-149` (auto-detects host OS) |
+| `chrome-latest-windows` | `chrome-149-windows` |
+| `chrome-latest-linux` | `chrome-149-linux` |
+| `chrome-latest-macos` | `chrome-149-macos` |
 | `chrome-latest-ios` | `chrome-148-ios` |
 | `chrome-latest-android` | `chrome-148-android` |
 | `firefox-latest` | `firefox-148` |
@@ -9508,7 +9510,7 @@ The `-latest` aliases follow the newest version we track. Not separate fingerpri
 | `ios-safari-latest` | `safari-18-ios` (back-compat naming) |
 | `android-chrome-latest` | `chrome-148-android` (back-compat naming) |
 
-`chrome-148` with no platform suffix sniffs the running OS and dispatches to `chrome-148-windows`, `chrome-148-macos`, or `chrome-148-linux`. Pick this if your binary should match the host OS. Pick the explicit suffix when you want, say, a Windows fingerprint from a Linux box. That's the common scraping case.
+`chrome-149` with no platform suffix sniffs the running OS and dispatches to `chrome-149-windows`, `chrome-149-macos`, or `chrome-149-linux`. Pick this if your binary should match the host OS. Pick the explicit suffix when you want, say, a Windows fingerprint from a Linux box. That's the common scraping case.
 
 ---
 
@@ -9518,7 +9520,7 @@ Captured from the Linux build host on `2026-05-10` via `NewSession(preset).Get(c
 
 | Preset | Protocol | JA3 hash | JA4 | Akamai HTTP/2 hash | PeetPrint |
 |---|---|---|---|---|---|
-| `chrome-latest` (resolves to `chrome-148-linux`) | h2 | `51c8a5ff78d815668581664c5789d09c` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `52d84b11737d980aef856699f885ca86` | `1d4ffe9b0e34acac0bd883fa7f79d7b5` |
+| `chrome-latest` (resolves to `chrome-149-linux`) | h2 | `51c8a5ff78d815668581664c5789d09c` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `52d84b11737d980aef856699f885ca86` | `1d4ffe9b0e34acac0bd883fa7f79d7b5` |
 | `chrome-148-windows` | h2 | `f592f2dfba4cdfc1b18ed1f29df8c8b7` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `52d84b11737d980aef856699f885ca86` | `1d4ffe9b0e34acac0bd883fa7f79d7b5` |
 | `firefox-148` | h2 | `6f7889b9fb1a62a9577e685c1fcfa919` | `t13d1717h2_5b57614c22b0_3cbfd9057e0d` | `6ea73faa8fc5aac76bded7bd238f6433` | `89d89662b21018947a9a46658c4f5ede` |
 | `safari-18` | h2 | `c8af4d593e65bd6ba927ef9a0bdef541` | `t13d2013h2_a09f3c656075_7f0f34a4126d` | `90d8353e47699c4c38ecd773e9b5a089` | `62b834de729e78a9f0ebd1dd099314a7` |
@@ -9535,10 +9537,13 @@ For other presets, capture them yourself the same way. Or read the JSON in `fing
 
 ## Chrome desktop
 
-The Chrome desktop family. Versions 143-146 are Go-defined in `fingerprint/presets.go`. Versions 147 and 148 ship as JSON in `fingerprint/embedded/`, inheriting from 146 / 147 with just the User-Agent and `sec-ch-ua` brand list bumped.
+The Chrome desktop family. Versions 143-146 are Go-defined in `fingerprint/presets.go`. Versions 147, 148, and 149 ship as JSON in `fingerprint/embedded/`, inheriting from 146 / 147 / 148 with just the User-Agent and `sec-ch-ua` brand list bumped. 149's wire fingerprint is identical to 148.
 
 | Preset | UA | `sec-ch-ua` | Notes |
 |---|---|---|---|
+| `chrome-149-windows` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36` | `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"` | Inherits TLS from `chrome-148-windows`. |
+| `chrome-149-linux` | `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36` | `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"` | Inherits TLS from `chrome-148-linux`. |
+| `chrome-149-macos` | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36` | `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"` | Inherits TLS from `chrome-148-macos`. |
 | `chrome-148-windows` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36` | `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` | Inherits TLS from `chrome-147-windows`. |
 | `chrome-148-linux` | `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36` | `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` | Inherits TLS from `chrome-147-linux`. |
 | `chrome-148-macos` | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36` | `"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"` | Inherits TLS from `chrome-147-macos`. |
@@ -9554,7 +9559,7 @@ The Chrome desktop family. Versions 143-146 are Go-defined in `fingerprint/prese
 | `chrome-141` | `...Chrome/141.0.0.0...` | matching brand list | Auto-detects platform. |
 | `chrome-133` | `...Chrome/133.0.0.0...` | matching brand list | Auto-detects platform. |
 
-The unsuffixed `chrome-148` / `chrome-147` / `chrome-146` / `chrome-145` / `chrome-144` / `chrome-143` resolve to whichever platform-suffixed variant matches the host OS at runtime. For consistent results across machines, pick the suffix.
+The unsuffixed `chrome-149` / `chrome-148` / `chrome-147` / `chrome-146` / `chrome-145` / `chrome-144` / `chrome-143` resolve to whichever platform-suffixed variant matches the host OS at runtime. For consistent results across machines, pick the suffix.
 
 All Chrome desktop presets:
 
