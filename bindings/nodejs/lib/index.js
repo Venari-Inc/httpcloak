@@ -21,91 +21,143 @@ class HTTPCloakError extends Error {
 }
 
 /**
- * Available browser presets for TLS fingerprinting.
+ * Available browser presets for TLS fingerprinting. Mirrors the runtime
+ * registry shipped by the linked libhttpcloak. Use Preset.CHROME_LATEST to
+ * auto-track newest stable Chrome, or pin to a specific major version for
+ * reproducibility.
  *
- * Use these constants instead of typing preset strings manually:
  *   const httpcloak = require("httpcloak");
- *   httpcloak.configure({ preset: httpcloak.Preset.CHROME_143 });
+ *   httpcloak.configure({ preset: httpcloak.Preset.CHROME_LATEST });
  *
- *   // Or with Session
- *   const session = new httpcloak.Session({ preset: httpcloak.Preset.FIREFOX_133 });
+ *   const session = new httpcloak.Session({ preset: httpcloak.Preset.FIREFOX_LATEST });
  */
 const Preset = {
-  // Chrome 146 (latest)
+  // Chrome latest (auto-resolves to newest shipped Chrome)
+  CHROME_LATEST: "chrome-latest",
+  CHROME_LATEST_WINDOWS: "chrome-latest-windows",
+  CHROME_LATEST_LINUX: "chrome-latest-linux",
+  CHROME_LATEST_MACOS: "chrome-latest-macos",
+  CHROME_LATEST_IOS: "chrome-latest-ios",
+  CHROME_LATEST_ANDROID: "chrome-latest-android",
+
+  // Chrome 149 (desktop; wire fingerprint identical to 148)
+  CHROME_149: "chrome-149",
+  CHROME_149_WINDOWS: "chrome-149-windows",
+  CHROME_149_LINUX: "chrome-149-linux",
+  CHROME_149_MACOS: "chrome-149-macos",
+
+  // Chrome 148
+  CHROME_148: "chrome-148",
+  CHROME_148_WINDOWS: "chrome-148-windows",
+  CHROME_148_LINUX: "chrome-148-linux",
+  CHROME_148_MACOS: "chrome-148-macos",
+  CHROME_148_IOS: "chrome-148-ios",
+  CHROME_148_ANDROID: "chrome-148-android",
+
+  // Chrome 147
+  CHROME_147: "chrome-147",
+  CHROME_147_WINDOWS: "chrome-147-windows",
+  CHROME_147_LINUX: "chrome-147-linux",
+  CHROME_147_MACOS: "chrome-147-macos",
+  CHROME_147_IOS: "chrome-147-ios",
+  CHROME_147_ANDROID: "chrome-147-android",
+
+  // Chrome 146
   CHROME_146: "chrome-146",
   CHROME_146_WINDOWS: "chrome-146-windows",
   CHROME_146_LINUX: "chrome-146-linux",
   CHROME_146_MACOS: "chrome-146-macos",
+  CHROME_146_IOS: "chrome-146-ios",
+  CHROME_146_ANDROID: "chrome-146-android",
 
   // Chrome 145
   CHROME_145: "chrome-145",
   CHROME_145_WINDOWS: "chrome-145-windows",
   CHROME_145_LINUX: "chrome-145-linux",
   CHROME_145_MACOS: "chrome-145-macos",
+  CHROME_145_IOS: "chrome-145-ios",
+  CHROME_145_ANDROID: "chrome-145-android",
 
   // Chrome 144
   CHROME_144: "chrome-144",
   CHROME_144_WINDOWS: "chrome-144-windows",
   CHROME_144_LINUX: "chrome-144-linux",
   CHROME_144_MACOS: "chrome-144-macos",
+  CHROME_144_IOS: "chrome-144-ios",
+  CHROME_144_ANDROID: "chrome-144-android",
 
   // Chrome 143
   CHROME_143: "chrome-143",
   CHROME_143_WINDOWS: "chrome-143-windows",
   CHROME_143_LINUX: "chrome-143-linux",
   CHROME_143_MACOS: "chrome-143-macos",
+  CHROME_143_IOS: "chrome-143-ios",
+  CHROME_143_ANDROID: "chrome-143-android",
 
-  // Chrome 141
+  // Older Chrome (H1/H2 only, no H3)
   CHROME_141: "chrome-141",
-
-  // Chrome 133
   CHROME_133: "chrome-133",
 
-  // Mobile Chrome
-  CHROME_143_IOS: "chrome-143-ios",
-  CHROME_144_IOS: "chrome-144-ios",
-  CHROME_145_IOS: "chrome-145-ios",
-  CHROME_146_IOS: "chrome-146-ios",
-  CHROME_143_ANDROID: "chrome-143-android",
-  CHROME_144_ANDROID: "chrome-144-android",
-  CHROME_145_ANDROID: "chrome-145-android",
-  CHROME_146_ANDROID: "chrome-146-android",
-
   // Firefox
+  FIREFOX_LATEST: "firefox-latest",
+  FIREFOX_148: "firefox-148",
   FIREFOX_133: "firefox-133",
 
   // Safari (desktop and mobile)
+  SAFARI_LATEST: "safari-latest",
   SAFARI_18: "safari-18",
   SAFARI_17_IOS: "safari-17-ios",
   SAFARI_18_IOS: "safari-18-ios",
+  SAFARI_LATEST_IOS: "safari-latest-ios",
 
-  // Backwards compatibility aliases (old naming convention)
+  // Backwards compatibility aliases (old "ios-chrome" / "android-chrome" naming)
   IOS_CHROME_143: "chrome-143-ios",
   IOS_CHROME_144: "chrome-144-ios",
   IOS_CHROME_145: "chrome-145-ios",
   IOS_CHROME_146: "chrome-146-ios",
+  IOS_CHROME_147: "chrome-147-ios",
+  IOS_CHROME_148: "chrome-148-ios",
+  IOS_CHROME_LATEST: "chrome-latest-ios",
   ANDROID_CHROME_143: "chrome-143-android",
   ANDROID_CHROME_144: "chrome-144-android",
   ANDROID_CHROME_145: "chrome-145-android",
   ANDROID_CHROME_146: "chrome-146-android",
+  ANDROID_CHROME_147: "chrome-147-android",
+  ANDROID_CHROME_148: "chrome-148-android",
+  ANDROID_CHROME_LATEST: "chrome-latest-android",
   IOS_SAFARI_17: "safari-17-ios",
   IOS_SAFARI_18: "safari-18-ios",
+  IOS_SAFARI_LATEST: "safari-latest-ios",
 
   /**
-   * Get all available preset names
-   * @returns {string[]} List of all preset names
+   * Get all built-in preset names known to this binding version.
+   *
+   * For the authoritative live list (which may include custom presets
+   * loaded at runtime), call `availablePresets()` instead.
+   *
+   * @returns {string[]} List of preset names
    */
   all() {
     return [
+      this.CHROME_LATEST, this.CHROME_LATEST_WINDOWS, this.CHROME_LATEST_LINUX,
+      this.CHROME_LATEST_MACOS, this.CHROME_LATEST_IOS, this.CHROME_LATEST_ANDROID,
+      this.CHROME_149, this.CHROME_149_WINDOWS, this.CHROME_149_LINUX, this.CHROME_149_MACOS,
+      this.CHROME_148, this.CHROME_148_WINDOWS, this.CHROME_148_LINUX, this.CHROME_148_MACOS,
+      this.CHROME_148_IOS, this.CHROME_148_ANDROID,
+      this.CHROME_147, this.CHROME_147_WINDOWS, this.CHROME_147_LINUX, this.CHROME_147_MACOS,
+      this.CHROME_147_IOS, this.CHROME_147_ANDROID,
       this.CHROME_146, this.CHROME_146_WINDOWS, this.CHROME_146_LINUX, this.CHROME_146_MACOS,
+      this.CHROME_146_IOS, this.CHROME_146_ANDROID,
       this.CHROME_145, this.CHROME_145_WINDOWS, this.CHROME_145_LINUX, this.CHROME_145_MACOS,
+      this.CHROME_145_IOS, this.CHROME_145_ANDROID,
       this.CHROME_144, this.CHROME_144_WINDOWS, this.CHROME_144_LINUX, this.CHROME_144_MACOS,
+      this.CHROME_144_IOS, this.CHROME_144_ANDROID,
       this.CHROME_143, this.CHROME_143_WINDOWS, this.CHROME_143_LINUX, this.CHROME_143_MACOS,
+      this.CHROME_143_IOS, this.CHROME_143_ANDROID,
       this.CHROME_141, this.CHROME_133,
-      this.CHROME_146_IOS, this.CHROME_145_IOS, this.CHROME_144_IOS, this.CHROME_143_IOS,
-      this.CHROME_146_ANDROID, this.CHROME_145_ANDROID, this.CHROME_144_ANDROID, this.CHROME_143_ANDROID,
-      this.FIREFOX_133,
-      this.SAFARI_18, this.SAFARI_17_IOS, this.SAFARI_18_IOS,
+      this.FIREFOX_LATEST, this.FIREFOX_148, this.FIREFOX_133,
+      this.SAFARI_LATEST, this.SAFARI_18, this.SAFARI_17_IOS, this.SAFARI_18_IOS,
+      this.SAFARI_LATEST_IOS,
     ];
   },
 };
@@ -830,6 +882,22 @@ function getLib() {
       httpcloak_set_cookie: nativeLibHandle.func("httpcloak_set_cookie", "void", ["int64", "str"]),
       httpcloak_delete_cookie: nativeLibHandle.func("httpcloak_delete_cookie", "void", ["int64", "str", "str"]),
       httpcloak_clear_cookies: nativeLibHandle.func("httpcloak_clear_cookies", "void", ["int64"]),
+      httpcloak_session_clear_cache: nativeLibHandle.func("httpcloak_session_clear_cache", "void", ["int64"]),
+      httpcloak_session_stats: nativeLibHandle.func("httpcloak_session_stats", HeapStr, ["int64"]),
+      httpcloak_session_idle_time: nativeLibHandle.func("httpcloak_session_idle_time", "int64", ["int64"]),
+      httpcloak_session_is_active: nativeLibHandle.func("httpcloak_session_is_active", "int", ["int64"]),
+      httpcloak_session_touch: nativeLibHandle.func("httpcloak_session_touch", "void", ["int64"]),
+      httpcloak_session_set_conditional_cache: nativeLibHandle.func("httpcloak_session_set_conditional_cache", "void", ["int64", "int"]),
+      httpcloak_session_get_conditional_cache: nativeLibHandle.func("httpcloak_session_get_conditional_cache", "int", ["int64"]),
+      httpcloak_session_set_client_hints: nativeLibHandle.func("httpcloak_session_set_client_hints", "void", ["int64", "int"]),
+      httpcloak_session_get_client_hints: nativeLibHandle.func("httpcloak_session_get_client_hints", "int", ["int64"]),
+      httpcloak_session_set_high_entropy_client_hints: nativeLibHandle.func("httpcloak_session_set_high_entropy_client_hints", "void", ["int64", "int"]),
+      httpcloak_session_get_high_entropy_client_hints: nativeLibHandle.func("httpcloak_session_get_high_entropy_client_hints", "int", ["int64"]),
+      httpcloak_session_set_follow_redirects: nativeLibHandle.func("httpcloak_session_set_follow_redirects", "void", ["int64", "int"]),
+      httpcloak_session_get_follow_redirects: nativeLibHandle.func("httpcloak_session_get_follow_redirects", "int", ["int64"]),
+      httpcloak_session_set_max_redirects: nativeLibHandle.func("httpcloak_session_set_max_redirects", "void", ["int64", "int"]),
+      httpcloak_session_get_max_redirects: nativeLibHandle.func("httpcloak_session_get_max_redirects", "int", ["int64"]),
+      httpcloak_session_set_identifier: nativeLibHandle.func("httpcloak_session_set_identifier", "void", ["int64", "str"]),
       httpcloak_free_string: httpcloakFreeString,
       httpcloak_version: nativeLibHandle.func("httpcloak_version", HeapStr, []),
       httpcloak_available_presets: nativeLibHandle.func("httpcloak_available_presets", HeapStr, []),
@@ -841,6 +909,7 @@ function getLib() {
       httpcloak_get_async: nativeLibHandle.func("httpcloak_get_async", "void", ["int64", "str", "str", "int64"]),
       httpcloak_post_async: nativeLibHandle.func("httpcloak_post_async", "void", ["int64", "str", "str", "str", "int64"]),
       httpcloak_request_async: nativeLibHandle.func("httpcloak_request_async", "void", ["int64", "str", "int64"]),
+      httpcloak_cancel_request: nativeLibHandle.func("httpcloak_cancel_request", "void", ["int64"]),
       // Streaming functions
       httpcloak_stream_get: nativeLibHandle.func("httpcloak_stream_get", "int64", ["int64", "str", "str"]),
       httpcloak_stream_post: nativeLibHandle.func("httpcloak_stream_post", "int64", ["int64", "str", "str", "str"]),
@@ -848,6 +917,15 @@ function getLib() {
       httpcloak_stream_get_metadata: nativeLibHandle.func("httpcloak_stream_get_metadata", HeapStr, ["int64"]),
       httpcloak_stream_read: nativeLibHandle.func("httpcloak_stream_read", HeapStr, ["int64", "int64"]),
       httpcloak_stream_close: nativeLibHandle.func("httpcloak_stream_close", "void", ["int64"]),
+      // Chunked upload state machine (mirrors Python's stream_upload). Lets
+      // bindings ship arbitrarily-large bodies without buffering in memory:
+      // upload_start opens a pipe to the Go side, upload_write_raw streams
+      // chunks straight to the wire, upload_finish reads the response,
+      // upload_cancel tears down a partial upload on error.
+      httpcloak_upload_start: nativeLibHandle.func("httpcloak_upload_start", "int64", ["int64", "str", "str"]),
+      httpcloak_upload_write_raw: nativeLibHandle.func("httpcloak_upload_write_raw", "int", ["int64", "void*", "int"]),
+      httpcloak_upload_finish: nativeLibHandle.func("httpcloak_upload_finish", HeapStr, ["int64"]),
+      httpcloak_upload_cancel: nativeLibHandle.func("httpcloak_upload_cancel", "void", ["int64"]),
       // Raw response functions for fast-path (zero-copy)
       httpcloak_get_raw: nativeLibHandle.func("httpcloak_get_raw", "int64", ["int64", "str", "str"]),
       httpcloak_post_raw: nativeLibHandle.func("httpcloak_post_raw", "int64", ["int64", "str", "void*", "int", "str"]),
@@ -881,6 +959,8 @@ function getLib() {
       httpcloak_local_proxy_get_stats: nativeLibHandle.func("httpcloak_local_proxy_get_stats", HeapStr, ["int64"]),
       httpcloak_local_proxy_register_session: nativeLibHandle.func("httpcloak_local_proxy_register_session", HeapStr, ["int64", "str", "int64"]),
       httpcloak_local_proxy_unregister_session: nativeLibHandle.func("httpcloak_local_proxy_unregister_session", "int", ["int64", "str"]),
+      httpcloak_local_proxy_list_sessions: nativeLibHandle.func("httpcloak_local_proxy_list_sessions", HeapStr, ["int64"]),
+      httpcloak_local_proxy_has_session: nativeLibHandle.func("httpcloak_local_proxy_has_session", "int", ["int64", "str"]),
       // Session cache callbacks
       httpcloak_set_session_cache_callbacks: nativeLibHandle.func("httpcloak_set_session_cache_callbacks", "void", [
         koffi.pointer(SessionCacheGetProto),
@@ -1010,7 +1090,7 @@ class AsyncCallbackManager {
    * Register a new async request
    * @returns {{ callbackId: number, promise: Promise<Response> }}
    */
-  registerRequest(nativeLib) {
+  registerRequest(nativeLib, signal) {
     this._ensureCallback();
 
     // Register callback with Go (each request gets unique ID)
@@ -1026,6 +1106,43 @@ class AsyncCallbackManager {
 
     this._pendingRequests.set(Number(callbackId), { resolve, reject, startTime });
     this._ref(); // Keep event loop alive
+
+    // AbortSignal integration. If the caller supplies a signal that is
+    // already aborted, cancel synchronously; otherwise install a listener
+    // that fires once. Pre-aborted signals never deliver the "abort" event,
+    // so the explicit early-path matters.
+    //
+    // Order matters in onAbort:
+    //   1) cancel_request → unblocks the Go goroutine (ctx.Done fires)
+    //   2) unregister_callback → removes the entry from Go's asyncCallbacks
+    //      map so the goroutine's final invokeCallback() finds !exists and
+    //      returns silently. Without this, Go would still relay an error
+    //      callback through koffi after the JS side has already settled
+    //      and torn down its callback context, which crashes node with
+    //      "Error::ThrowAsJavaScriptException napi_throw" during exit.
+    if (signal && typeof signal === "object" && "aborted" in signal) {
+      const onAbort = () => {
+        const cid = Number(callbackId);
+        try {
+          nativeLib.httpcloak_cancel_request(cid);
+          nativeLib.httpcloak_unregister_callback(cid);
+        } catch {
+          // Best-effort: the request may have already settled.
+        }
+        const pending = this._pendingRequests.get(cid);
+        if (pending) {
+          this._pendingRequests.delete(cid);
+          this._unref();
+          const reason = signal.reason ?? new Error("AbortError");
+          pending.reject(reason);
+        }
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else if (typeof signal.addEventListener === "function") {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     return { callbackId, promise };
   }
@@ -1362,6 +1479,11 @@ class Session {
       enableSpeculativeTls = false,
       switchProtocol = null,
       withoutCookieJar = false,
+      withoutConditionalCache = false,
+      withoutClientHints = false,
+      withoutHighEntropyClientHints = false,
+      disableEch = false,
+      disableHttp3 = false,
       ja3 = null,
       akamai = null,
       extraFp = null,
@@ -1438,6 +1560,23 @@ class Session {
     }
     if (withoutCookieJar) {
       config.without_cookie_jar = true;
+    }
+    if (withoutConditionalCache) {
+      config.without_conditional_cache = true;
+    }
+    // Full strip: drop ALL sec-ch-ua client hints, including the always-on trio.
+    if (withoutClientHints) {
+      config.without_client_hints = true;
+    }
+    // High-entropy strip: keep the always-on trio, drop only the Accept-CH hints.
+    if (withoutHighEntropyClientHints) {
+      config.without_high_entropy_client_hints = true;
+    }
+    if (disableEch) {
+      config.disable_ech = true;
+    }
+    if (disableHttp3) {
+      config.disable_http3 = true;
     }
     if (ja3) {
       config.ja3 = ja3;
@@ -1602,7 +1741,7 @@ class Session {
    * @returns {Response} Response object
    */
   getSync(url, options = {}) {
-    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null } = options;
+    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
@@ -1618,6 +1757,18 @@ class Session {
     }
     if (fetchMode) {
       reqOptions.fetch_mode = fetchMode;
+    }
+    if (allowRedirects !== null && allowRedirects !== undefined) {
+      reqOptions.follow_redirects = !!allowRedirects;
+    }
+    if (disableConditionalCache) {
+      reqOptions.disable_conditional_cache = true;
+    }
+    if (disableClientHints) {
+      reqOptions.disable_client_hints = true;
+    }
+    if (disableHighEntropyClientHints) {
+      reqOptions.disable_high_entropy_client_hints = true;
     }
     const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
 
@@ -1648,7 +1799,7 @@ class Session {
    * @returns {Response} Response object
    */
   postSync(url, options = {}) {
-    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null } = options;
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
@@ -1693,6 +1844,18 @@ class Session {
     if (fetchMode) {
       reqOptions.fetch_mode = fetchMode;
     }
+    if (allowRedirects !== null && allowRedirects !== undefined) {
+      reqOptions.follow_redirects = !!allowRedirects;
+    }
+    if (disableConditionalCache) {
+      reqOptions.disable_conditional_cache = true;
+    }
+    if (disableClientHints) {
+      reqOptions.disable_client_hints = true;
+    }
+    if (disableHighEntropyClientHints) {
+      reqOptions.disable_high_entropy_client_hints = true;
+    }
     const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
 
     const bodyPtr = bodyBuffer || Buffer.alloc(0);
@@ -1717,7 +1880,7 @@ class Session {
    * @returns {Response} Response object
    */
   requestSync(method, url, options = {}) {
-    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null } = options;
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
@@ -1760,6 +1923,10 @@ class Session {
     if (mergedHeaders) requestConfig.headers = mergedHeaders;
     if (timeout) requestConfig.timeout = timeout;
     if (fetchMode) requestConfig.fetch_mode = fetchMode;
+    if (allowRedirects !== null && allowRedirects !== undefined) requestConfig.follow_redirects = !!allowRedirects;
+    if (disableConditionalCache) requestConfig.disable_conditional_cache = true;
+    if (disableClientHints) requestConfig.disable_client_hints = true;
+    if (disableHighEntropyClientHints) requestConfig.disable_high_entropy_client_hints = true;
 
     const bodyPtr = bodyBuffer || Buffer.alloc(0);
     const bodyLen = bodyBuffer ? bodyBuffer.length : 0;
@@ -1790,7 +1957,7 @@ class Session {
    * @returns {Promise<Response>} Response object
    */
   get(url, options = {}) {
-    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null } = options;
+    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false, signal = null } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
@@ -1813,11 +1980,23 @@ class Session {
       // httpcloak_request_async — that path also uses time.Second).
       reqOptions.timeout = timeout;
     }
+    if (allowRedirects !== null && allowRedirects !== undefined) {
+      reqOptions.follow_redirects = !!allowRedirects;
+    }
+    if (disableConditionalCache) {
+      reqOptions.disable_conditional_cache = true;
+    }
+    if (disableClientHints) {
+      reqOptions.disable_client_hints = true;
+    }
+    if (disableHighEntropyClientHints) {
+      reqOptions.disable_high_entropy_client_hints = true;
+    }
     const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
 
     // Register async request with callback manager
     const manager = getAsyncManager();
-    const { callbackId, promise } = manager.registerRequest(this._lib);
+    const { callbackId, promise } = manager.registerRequest(this._lib, signal);
 
     // Start async request
     this._lib.httpcloak_get_async(this._handle, url, optionsJson, callbackId);
@@ -1833,16 +2012,23 @@ class Session {
    * @returns {Promise<Response>} Response object
    */
   post(url, options = {}) {
-    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null } = options;
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false, signal = null } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
+
+    // bodyEncoding tells clib whether `body` is plain text or base64-encoded
+    // binary. Default "" = text. Anything that carries arbitrary bytes
+    // (Buffer, multipart) flows through as base64 so NUL bytes don't truncate
+    // the C string at the cgo boundary.
+    let bodyEncoding = "";
 
     // Handle multipart file upload
     if (files !== null) {
       const formData = (data !== null && typeof data === "object") ? data : null;
       const multipart = encodeMultipart(formData, files);
-      body = multipart.body.toString("latin1");
+      body = multipart.body.toString("base64");
+      bodyEncoding = "base64";
       mergedHeaders = mergedHeaders || {};
       mergedHeaders["Content-Type"] = multipart.contentType;
     }
@@ -1862,9 +2048,11 @@ class Session {
         mergedHeaders["Content-Type"] = "application/x-www-form-urlencoded";
       }
     }
-    // Handle Buffer body
+    // Handle Buffer body (binary payload). base64-encode so NUL bytes and
+    // non-UTF-8 sequences survive the cgo C-string round-trip intact.
     else if (Buffer.isBuffer(body)) {
-      body = body.toString("utf8");
+      body = body.toString("base64");
+      bodyEncoding = "base64";
     }
 
     // Use request auth if provided, otherwise fall back to session auth
@@ -1884,11 +2072,26 @@ class Session {
       // Public API: seconds. clib post_async path enforces in seconds.
       reqOptions.timeout = timeout;
     }
+    if (allowRedirects !== null && allowRedirects !== undefined) {
+      reqOptions.follow_redirects = !!allowRedirects;
+    }
+    if (disableConditionalCache) {
+      reqOptions.disable_conditional_cache = true;
+    }
+    if (disableClientHints) {
+      reqOptions.disable_client_hints = true;
+    }
+    if (disableHighEntropyClientHints) {
+      reqOptions.disable_high_entropy_client_hints = true;
+    }
+    if (bodyEncoding) {
+      reqOptions.body_encoding = bodyEncoding;
+    }
     const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
 
     // Register async request with callback manager
     const manager = getAsyncManager();
-    const { callbackId, promise } = manager.registerRequest(this._lib);
+    const { callbackId, promise } = manager.registerRequest(this._lib, signal);
 
     // Start async request
     this._lib.httpcloak_post_async(this._handle, url, body, optionsJson, callbackId);
@@ -1905,16 +2108,22 @@ class Session {
    * @returns {Promise<Response>} Response object
    */
   request(method, url, options = {}) {
-    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null } = options;
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false, signal = null } = options;
 
     url = addParamsToUrl(url, params);
     let mergedHeaders = this._mergeHeaders(headers);
+
+    // bodyEncoding tells clib whether `body` is text or base64 binary.
+    // Binary payloads (Buffer / multipart) flow through as base64 so they
+    // survive JSON serialization + the cgo C-string boundary intact.
+    let bodyEncoding = "";
 
     // Handle multipart file upload
     if (files !== null) {
       const formData = (data !== null && typeof data === "object") ? data : null;
       const multipart = encodeMultipart(formData, files);
-      body = multipart.body.toString("latin1");
+      body = multipart.body.toString("base64");
+      bodyEncoding = "base64";
       mergedHeaders = mergedHeaders || {};
       mergedHeaders["Content-Type"] = multipart.contentType;
     }
@@ -1934,9 +2143,11 @@ class Session {
         mergedHeaders["Content-Type"] = "application/x-www-form-urlencoded";
       }
     }
-    // Handle Buffer body
+    // Handle Buffer body (binary payload). base64-encode so non-UTF-8 bytes
+    // and NUL bytes survive JSON.stringify + the C boundary.
     else if (Buffer.isBuffer(body)) {
-      body = body.toString("utf8");
+      body = body.toString("base64");
+      bodyEncoding = "base64";
     }
 
     // Use request auth if provided, otherwise fall back to session auth
@@ -1950,12 +2161,17 @@ class Session {
     };
     if (mergedHeaders) requestConfig.headers = mergedHeaders;
     if (body) requestConfig.body = body;
+    if (bodyEncoding) requestConfig.body_encoding = bodyEncoding;
     if (timeout) requestConfig.timeout = timeout;
     if (fetchMode) requestConfig.fetch_mode = fetchMode;
+    if (allowRedirects !== null && allowRedirects !== undefined) requestConfig.follow_redirects = !!allowRedirects;
+    if (disableConditionalCache) requestConfig.disable_conditional_cache = true;
+    if (disableClientHints) requestConfig.disable_client_hints = true;
+    if (disableHighEntropyClientHints) requestConfig.disable_high_entropy_client_hints = true;
 
     // Register async request with callback manager
     const manager = getAsyncManager();
-    const { callbackId, promise } = manager.registerRequest(this._lib);
+    const { callbackId, promise } = manager.registerRequest(this._lib, signal);
 
     // Start async request
     this._lib.httpcloak_request_async(this._handle, JSON.stringify(requestConfig), callbackId);
@@ -2101,6 +2317,160 @@ class Session {
    */
   get cookies() {
     return this.getCookies();
+  }
+
+  // ===========================================================================
+  // Conditional Cache and Redirect Runtime Control
+  // ===========================================================================
+
+  /**
+   * Drop the session's per-URL conditional-cache map (ETag / Last-Modified).
+   * The next request to each URL goes out without If-None-Match /
+   * If-Modified-Since headers. Cookies and TLS tickets are not touched.
+   */
+  clearCache() {
+    this._lib.httpcloak_session_clear_cache(this._handle);
+  }
+
+  /**
+   * Return a snapshot of session counters, timestamps and transport-level
+   * metrics. Useful for long-running scrapers that want per-session metrics
+   * scraped into Prometheus / Datadog / etc.
+   *
+   * Keys: id, preset, created_at (Unix ns), last_used (Unix ns),
+   * request_count, active, cookie_count, cache_entry_count, age_ns,
+   * idle_time_ns, transport_stats (per-protocol object).
+   *
+   * @returns {Object} Stats snapshot, or empty object if the session is closed.
+   */
+  stats() {
+    const ptr = this._lib.httpcloak_session_stats(this._handle);
+    const raw = resultToString(ptr);
+    if (!raw) return {};
+    try { return JSON.parse(raw); } catch { return {}; }
+  }
+
+  /**
+   * Return the time since the session last serviced a request, in seconds.
+   * Returns -1 if the session handle is invalid.
+   *
+   * @returns {number} Idle time in seconds (may be fractional).
+   */
+  idleTime() {
+    const ns = Number(this._lib.httpcloak_session_idle_time(this._handle));
+    if (ns < 0) return -1;
+    return ns / 1_000_000_000;
+  }
+
+  /**
+   * Return true if the session is still usable (close() has not been called
+   * and the handle is valid).
+   *
+   * @returns {boolean}
+   */
+  isActive() {
+    return this._lib.httpcloak_session_is_active(this._handle) === 1;
+  }
+
+  /**
+   * Reset the idle timer to now without issuing a request. Useful in
+   * long-running pools where an external heartbeat shouldn't let a session
+   * look idle to a reaper.
+   */
+  touch() {
+    this._lib.httpcloak_session_touch(this._handle);
+  }
+
+  /**
+   * Toggle the session's ETag / If-Modified-Since handling at runtime.
+   * When disabled, the session stops injecting cache validators on outgoing
+   * requests and stops storing them from responses; the existing cache map
+   * is preserved (re-enabling resumes using it). Pair with clearCache() to
+   * also wipe previously-stored validators.
+   * @param {boolean} enabled
+   */
+  setConditionalCache(enabled) {
+    this._lib.httpcloak_session_set_conditional_cache(this._handle, enabled ? 1 : 0);
+  }
+
+  /**
+   * Return the session's current conditional-cache state.
+   * @returns {boolean}
+   */
+  getConditionalCache() {
+    return this._lib.httpcloak_session_get_conditional_cache(this._handle) !== 0;
+  }
+
+  /**
+   * Toggle the session's client-hints handling at runtime (full strip).
+   * When disabled, the session drops ALL sec-ch-ua client hints, including
+   * the always-on trio (sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform).
+   * The change takes effect on the next request and persists until set again.
+   * @param {boolean} enabled
+   */
+  setClientHints(enabled) {
+    this._lib.httpcloak_session_set_client_hints(this._handle, enabled ? 1 : 0);
+  }
+
+  /**
+   * Return the session's current client-hints state.
+   * @returns {boolean}
+   */
+  getClientHints() {
+    return this._lib.httpcloak_session_get_client_hints(this._handle) !== 0;
+  }
+
+  /**
+   * Toggle the session's high-entropy client-hints handling at runtime.
+   * When disabled, the session keeps the always-on trio but drops only the
+   * high-entropy Accept-CH hints (e.g. sec-ch-ua-platform-version, -arch,
+   * -model, -bitness, -full-version-list). Takes effect on the next request.
+   * @param {boolean} enabled
+   */
+  setHighEntropyClientHints(enabled) {
+    this._lib.httpcloak_session_set_high_entropy_client_hints(this._handle, enabled ? 1 : 0);
+  }
+
+  /**
+   * Return the session's current high-entropy client-hints state.
+   * @returns {boolean}
+   */
+  getHighEntropyClientHints() {
+    return this._lib.httpcloak_session_get_high_entropy_client_hints(this._handle) !== 0;
+  }
+
+  /**
+   * Toggle the session's redirect-following policy at runtime. The change
+   * takes effect on the next request and persists until set again.
+   * @param {boolean} enabled
+   */
+  setFollowRedirects(enabled) {
+    this._lib.httpcloak_session_set_follow_redirects(this._handle, enabled ? 1 : 0);
+  }
+
+  /**
+   * Return the session's current redirect-following policy.
+   * @returns {boolean}
+   */
+  getFollowRedirects() {
+    return this._lib.httpcloak_session_get_follow_redirects(this._handle) !== 0;
+  }
+
+  /**
+   * Update the session's redirect cap at runtime. Values of zero or below
+   * are ignored, leaving the prior cap (or the default of 10) in place.
+   * @param {number} max
+   */
+  setMaxRedirects(max) {
+    this._lib.httpcloak_session_set_max_redirects(this._handle, max);
+  }
+
+  /**
+   * Return the session's current redirect cap.
+   * @returns {number}
+   */
+  getMaxRedirects() {
+    return this._lib.httpcloak_session_get_max_redirects(this._handle);
   }
 
   // ===========================================================================
@@ -2399,7 +2769,7 @@ class Session {
    *   stream.close();
    */
   getStream(url, options = {}) {
-    const { params, headers, cookies, timeout } = options;
+    const { params, headers, cookies, timeout, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false } = options;
 
     // Add params to URL
     if (params) {
@@ -2425,6 +2795,18 @@ class Session {
     }
     if (timeout) {
       reqOptions.timeout = timeout;
+    }
+    if (allowRedirects !== null && allowRedirects !== undefined) {
+      reqOptions.follow_redirects = !!allowRedirects;
+    }
+    if (disableConditionalCache) {
+      reqOptions.disable_conditional_cache = true;
+    }
+    if (disableClientHints) {
+      reqOptions.disable_client_hints = true;
+    }
+    if (disableHighEntropyClientHints) {
+      reqOptions.disable_high_entropy_client_hints = true;
     }
     const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
 
@@ -2465,7 +2847,7 @@ class Session {
    * @returns {StreamResponse} - Streaming response for chunked reading
    */
   postStream(url, options = {}) {
-    const { body: bodyOpt, json: jsonBody, form, params, headers, cookies, timeout } = options;
+    const { body: bodyOpt, json: jsonBody, form, params, headers, cookies, timeout, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false } = options;
 
     // Add params to URL
     if (params) {
@@ -2505,6 +2887,18 @@ class Session {
     if (timeout) {
       reqOptions.timeout = timeout;
     }
+    if (allowRedirects !== null && allowRedirects !== undefined) {
+      reqOptions.follow_redirects = !!allowRedirects;
+    }
+    if (disableConditionalCache) {
+      reqOptions.disable_conditional_cache = true;
+    }
+    if (disableClientHints) {
+      reqOptions.disable_client_hints = true;
+    }
+    if (disableHighEntropyClientHints) {
+      reqOptions.disable_high_entropy_client_hints = true;
+    }
     const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
 
     // Start stream
@@ -2543,7 +2937,7 @@ class Session {
    * @returns {StreamResponse} - Streaming response for chunked reading
    */
   requestStream(method, url, options = {}) {
-    const { body, params, headers, cookies, timeout } = options;
+    const { body, params, headers, cookies, timeout, allowRedirects = null, disableConditionalCache = false, disableClientHints = false, disableHighEntropyClientHints = false } = options;
 
     // Add params to URL
     if (params) {
@@ -2575,6 +2969,18 @@ class Session {
     }
     if (timeout) {
       requestConfig.timeout = timeout;
+    }
+    if (allowRedirects !== null && allowRedirects !== undefined) {
+      requestConfig.follow_redirects = !!allowRedirects;
+    }
+    if (disableConditionalCache) {
+      requestConfig.disable_conditional_cache = true;
+    }
+    if (disableClientHints) {
+      requestConfig.disable_client_hints = true;
+    }
+    if (disableHighEntropyClientHints) {
+      requestConfig.disable_high_entropy_client_hints = true;
     }
 
     // Start stream
@@ -2893,6 +3299,84 @@ class Session {
    */
   patchFast(url, options = {}) {
     return this.requestFast("PATCH", url, options);
+  }
+
+  /**
+   * Stream an arbitrary-sized body to the wire without buffering in memory.
+   *
+   * `chunks` is anything iterable that yields Buffer-shaped objects: an
+   * AsyncIterable&lt;Buffer&gt; (e.g. an `fs.createReadStream(path)`), an
+   * Iterable&lt;Buffer&gt; (e.g. an array), or a sync generator that yields
+   * Buffers. String chunks are auto-encoded as UTF-8.
+   *
+   * The Go side opens an `io.Pipe()` for the body when uploadStart returns;
+   * each chunk is written straight through with no base64 / no JSON wrapping.
+   * On error the partial upload is cancelled and the underlying connection
+   * closed; on success uploadFinish reads the full response and parses it
+   * into a regular `Response` (same shape as a normal post()).
+   *
+   * @param {string} method  HTTP method (POST / PUT / PATCH typically)
+   * @param {string} url
+   * @param {AsyncIterable&lt;Buffer&gt;|Iterable&lt;Buffer&gt;} chunks  Body chunks
+   * @param {Object} [options]
+   * @param {Object} [options.headers]
+   * @param {string} [options.contentType="application/octet-stream"]
+   * @param {number} [options.timeout]  Per-request timeout in ms
+   * @returns {Promise<Response>}
+   */
+  async uploadStream(method, url, chunks, options = {}) {
+    const { headers = null, contentType = "application/octet-stream", timeout = null } = options;
+    const mergedHeaders = this._mergeHeaders(headers) || {};
+    const optsJson = JSON.stringify({
+      method: method.toUpperCase(),
+      headers: mergedHeaders,
+      content_type: contentType,
+      ...(timeout ? { timeout } : {}),
+    });
+
+    const uploadHandle = this._lib.httpcloak_upload_start(this._handle, url, optsJson);
+    if (uploadHandle <= 0) {
+      throw new HTTPCloakError("Failed to start streaming upload");
+    }
+
+    const startTime = Date.now();
+    try {
+      for await (const chunk of chunks) {
+        const buf = Buffer.isBuffer(chunk)
+          ? chunk
+          : typeof chunk === "string"
+            ? Buffer.from(chunk, "utf8")
+            : Buffer.from(chunk);
+        if (buf.length === 0) continue;
+        const written = this._lib.httpcloak_upload_write_raw(uploadHandle, buf, buf.length);
+        if (written < 0) {
+          throw new HTTPCloakError("Failed to write upload chunk");
+        }
+      }
+
+      const resultPtr = this._lib.httpcloak_upload_finish(uploadHandle);
+      const elapsed = Date.now() - startTime;
+      const raw = resultToString(resultPtr);
+      if (!raw) {
+        throw new HTTPCloakError("Empty response from streaming upload");
+      }
+      const data = JSON.parse(raw);
+      if (data.error) {
+        throw new HTTPCloakError(data.error);
+      }
+      return new Response(data, elapsed);
+    } catch (err) {
+      try { this._lib.httpcloak_upload_cancel(uploadHandle); } catch { /* best-effort */ }
+      throw err;
+    }
+  }
+
+  /**
+   * Convenience wrapper: streaming POST. Same semantics as
+   * {@link uploadStream}('POST', ...).
+   */
+  postUpload(url, chunks, options = {}) {
+    return this.uploadStream("POST", url, chunks, options);
   }
 }
 
@@ -3225,6 +3709,41 @@ class LocalProxy {
       sessionId
     );
     return result === 1;
+  }
+
+  /**
+   * Return the IDs of every session currently registered on this proxy.
+   *
+   * These are the same IDs the X-HTTPCloak-Session header accepts for
+   * per-request session routing. Useful for sanity checks, GC of stale
+   * registrations in long-running processes, and operational dashboards.
+   *
+   * @returns {string[]} List of registered session IDs (empty if none).
+   */
+  listSessions() {
+    const resultPtr = this._lib.httpcloak_local_proxy_list_sessions(this._handle);
+    const raw = resultToString(resultPtr);
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Return true if a session with the given ID is currently registered.
+   *
+   * Cheaper than listSessions() + .includes() when callers only need an
+   * existence check.
+   *
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  hasSession(sessionId) {
+    if (!sessionId) return false;
+    return this._lib.httpcloak_local_proxy_has_session(this._handle, sessionId) === 1;
   }
 
   /**

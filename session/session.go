@@ -77,9 +77,25 @@ type Session struct {
 	// Cache validation headers per URL (for If-None-Match, If-Modified-Since)
 	cacheEntries map[string]*cacheEntry
 
+	// conditionalCacheEnabled controls whether ETag / If-Modified-Since handling
+	// is active for this session. Initialised from !Config.WithoutConditionalCache
+	// and toggleable at runtime via SetConditionalCacheEnabled.
+	conditionalCacheEnabled bool
+
 	// Client hints requested by each host via Accept-CH header
 	// Key: host (e.g., "example.com"), Value: set of requested hint names
 	clientHints map[string]map[string]bool
+
+	// clientHintsEnabled gates ALL UA client hints (the always-on sec-ch-ua trio
+	// AND high-entropy). Initialised from !Config.WithoutClientHints; toggle at
+	// runtime with SetClientHintsEnabled. When false the request is marked so the
+	// transport strips the preset trio and no high-entropy hints are injected.
+	clientHintsEnabled bool
+
+	// highEntropyClientHintsEnabled gates only the high-entropy hints (the ones
+	// sent after Accept-CH). Initialised from !Config.WithoutHighEntropyClientHints;
+	// toggle at runtime with SetHighEntropyClientHintsEnabled.
+	highEntropyClientHintsEnabled bool
 
 	// Key log writer for TLS traffic decryption (Wireshark)
 	keyLogWriter io.WriteCloser
@@ -170,6 +186,15 @@ func NewSessionWithOptions(id string, config *protocol.SessionConfig, opts *Sess
 	}
 	t = transport.NewTransportWithConfig(presetName, proxy, transportConfig)
 
+	// Wire the session timeout into the transport so it actually bounds requests
+	// (dial + proxy CONNECT + TLS handshake + response). Without this the
+	// transport stays on its 30s default and a stalled proxy ignores the
+	// session timeout entirely. config.Timeout is in seconds (see the writers in
+	// httpcloak.go and the cgo layer; the per-request override still wins).
+	if config.Timeout > 0 {
+		t.SetTimeout(time.Duration(config.Timeout) * time.Second)
+	}
+
 	// Disable TLS certificate verification if requested
 	if config.InsecureSkipVerify {
 		t.SetInsecureSkipVerify(true)
@@ -208,18 +233,21 @@ func NewSessionWithOptions(id string, config *protocol.SessionConfig, opts *Sess
 	}
 
 	return &Session{
-		ID:             id,
-		CreatedAt:      time.Now(),
-		LastUsed:       time.Now(),
-		RequestCount:   0,
-		Config:         config,
-		transport:      t,
-		cookies:        NewCookieJar(),
-		cacheEntries:   make(map[string]*cacheEntry),
-		clientHints:    make(map[string]map[string]bool),
-		keyLogWriter:   keyLogWriter,
-		switchProtocol: switchProto,
-		active:         true,
+		ID:                      id,
+		CreatedAt:               time.Now(),
+		LastUsed:                time.Now(),
+		RequestCount:            0,
+		Config:                  config,
+		transport:               t,
+		cookies:                 NewCookieJar(),
+		cacheEntries:            make(map[string]*cacheEntry),
+		conditionalCacheEnabled: !config.WithoutConditionalCache,
+		clientHints:             make(map[string]map[string]bool),
+		clientHintsEnabled:            !config.WithoutClientHints,
+		highEntropyClientHintsEnabled: !config.WithoutHighEntropyClientHints,
+		keyLogWriter:            keyLogWriter,
+		switchProtocol:          switchProto,
+		active:                  true,
 	}
 }
 
@@ -247,14 +275,17 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 		req.Headers["cache-control"] = []string{"max-age=0"}
 	}
 
-	// Add cache validation headers (If-None-Match, If-Modified-Since)
-	// This makes requests look like a real browser that caches resources
-	if cached, exists := s.cacheEntries[req.URL]; exists {
-		if cached.etag != "" {
-			req.Headers["If-None-Match"] = []string{cached.etag}
-		}
-		if cached.lastModified != "" {
-			req.Headers["If-Modified-Since"] = []string{cached.lastModified}
+	// Add cache validation headers (If-None-Match, If-Modified-Since) when
+	// the conditional cache is enabled session-wide AND the per-request flag
+	// hasn't opted out. Skipping here also means a fresh fetch on this URL.
+	if s.conditionalCacheEnabled && !req.DisableConditionalCache {
+		if cached, exists := s.cacheEntries[req.URL]; exists {
+			if cached.etag != "" {
+				req.Headers["If-None-Match"] = []string{cached.etag}
+			}
+			if cached.lastModified != "" {
+				req.Headers["If-Modified-Since"] = []string{cached.lastModified}
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -315,8 +346,10 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 			}
 		}
 
-		// Apply high-entropy client hints if the host requested them via Accept-CH
-		s.applyClientHints(host, req.Headers)
+		// Resolve client-hint policy (opt-outs + high-entropy injection). This
+		// also marks req for the transport to strip the preset trio on a full
+		// opt-out.
+		s.applyClientHintPolicy(host, req)
 
 		resp, err = s.transport.Do(ctx, req)
 
@@ -385,12 +418,17 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 	// Parse Accept-CH header to store requested client hints for this host
 	s.parseAcceptCH(host, resp.Headers)
 
-	// Store cache validation headers from response for future requests
-	s.storeCacheHeaders(req.URL, resp.Headers)
+	// Store cache validation headers from response for future requests, unless
+	// the conditional cache is disabled session-wide or the caller asked to
+	// skip it for this request.
+	if s.conditionalCacheEnabled && !req.DisableConditionalCache {
+		s.storeCacheHeaders(req.URL, resp.Headers)
+	}
 
 	// Handle redirects
 	if isRedirectStatus(resp.StatusCode) {
-		// Check if we should follow redirects
+		// Per-request override (req.FollowRedirects, when non-nil) wins over the
+		// session-level Config.FollowRedirects. Default is to follow.
 		followRedirects := true
 		maxRedirects := 10
 		if s.Config != nil {
@@ -398,6 +436,9 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 			if s.Config.MaxRedirects > 0 {
 				maxRedirects = s.Config.MaxRedirects
 			}
+		}
+		if req.FollowRedirects != nil {
+			followRedirects = *req.FollowRedirects
 		}
 
 		if followRedirects {
@@ -473,6 +514,19 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 					continue
 				}
 				newReq.Headers[k] = v
+			}
+
+			// Synthesize the next-hop Referer to match Chrome's default
+			// strict-origin-when-cross-origin policy. A browser sends a Referer
+			// on every redirect hop except an https->http downgrade; httpcloak
+			// previously carried a stale copied value (or none at all), which a
+			// server inspecting the redirect chain can use to fingerprint it.
+			// Drop any copied Referer (either casing) first so we don't emit a
+			// duplicate, then set the policy-correct value.
+			delete(newReq.Headers, "Referer")
+			delete(newReq.Headers, "referer")
+			if ref := redirectReferer(req.URL, schemeDowngrade, crossOrigin); ref != "" {
+				newReq.Headers["Referer"] = []string{ref}
 			}
 
 			// 307/308 preserve body
@@ -762,8 +816,43 @@ func (s *Session) parseAcceptCH(host string, headers map[string][]string) {
 	s.clientHints[host] = hints
 }
 
-// applyClientHints adds high-entropy client hints headers to the request if the host
-// has previously requested them via Accept-CH header
+// applyClientHintPolicy resolves the per-request client-hint gating (the
+// session-wide toggles combined with the per-request flags), mutates req so the
+// transport strips the always-on sec-ch-ua trio on a full opt-out, and injects
+// the high-entropy hints when they are allowed and the host has advertised
+// Accept-CH. Shared by the buffered and streaming dispatch paths so both behave
+// identically.
+func (s *Session) applyClientHintPolicy(host string, req *transport.Request) {
+	s.mu.RLock()
+	chEnabled := s.clientHintsEnabled
+	heEnabled := s.highEntropyClientHintsEnabled
+	s.mu.RUnlock()
+
+	// Full opt-out (per-request flag OR session-wide): the transport strips the
+	// preset sec-ch-* trio when req.DisableClientHints is set, and a full opt-out
+	// implies no high-entropy hints either.
+	if req.DisableClientHints || !chEnabled {
+		req.DisableClientHints = true
+		return
+	}
+
+	// High-entropy opt-out: keep the always-on trio, skip the Accept-CH hints.
+	if req.DisableHighEntropyClientHints || !heEnabled {
+		return
+	}
+
+	if req.Headers == nil {
+		req.Headers = make(map[string][]string)
+	}
+	s.applyClientHints(host, req.Headers)
+}
+
+// applyClientHints adds the high-entropy client hints to the request if the host
+// has previously advertised them via Accept-CH. The values come from the resolved
+// preset (Preset.ResolveClientHints), so they stay coherent with the preset's
+// sec-ch-ua trio and User-Agent. A hint the caller already set explicitly is never
+// overwritten (matched case-insensitively), which makes per-request overrides
+// deterministic.
 func (s *Session) applyClientHints(host string, headers map[string][]string) {
 	s.mu.RLock()
 	hints, exists := s.clientHints[host]
@@ -773,82 +862,92 @@ func (s *Session) applyClientHints(host string, headers map[string][]string) {
 		return
 	}
 
-	// Get platform info for generating hint values
-	platform := s.getPlatform()
+	ch := s.resolveClientHints()
 
-	// Map of hint names to their header names and values
-	// Only add hints that were explicitly requested via Accept-CH
+	// Map of Accept-CH hint names to their header name and resolved value.
 	hintValues := map[string]struct {
 		header string
 		value  string
 	}{
-		"sec-ch-ua-arch":              {"Sec-Ch-Ua-Arch", platform.Arch},
-		"sec-ch-ua-bitness":           {"Sec-Ch-Ua-Bitness", platform.Bitness},
-		"sec-ch-ua-full-version-list": {"Sec-Ch-Ua-Full-Version-List", platform.FullVersionList},
-		"sec-ch-ua-model":             {"Sec-Ch-Ua-Model", platform.Model},
-		"sec-ch-ua-platform-version":  {"Sec-Ch-Ua-Platform-Version", platform.PlatformVersion},
-		"sec-ch-ua-wow64":             {"Sec-Ch-Ua-Wow64", platform.Wow64},
+		"sec-ch-ua-arch":              {"Sec-Ch-Ua-Arch", ch.UAArch},
+		"sec-ch-ua-bitness":           {"Sec-Ch-Ua-Bitness", ch.UABitness},
+		"sec-ch-ua-full-version-list": {"Sec-Ch-Ua-Full-Version-List", ch.UAFullVersionList},
+		"sec-ch-ua-model":             {"Sec-Ch-Ua-Model", ch.UAModel},
+		"sec-ch-ua-platform-version":  {"Sec-Ch-Ua-Platform-Version", ch.UAPlatformVersion},
+		"sec-ch-ua-wow64":             {"Sec-Ch-Ua-Wow64", ch.UAWow64},
 	}
 
 	for hintName, hintInfo := range hintValues {
-		if hints[hintName] && hintInfo.value != "" {
-			headers[hintInfo.header] = []string{hintInfo.value}
+		if !hints[hintName] || hintInfo.value == "" {
+			continue
 		}
+		// Don't clobber a value the caller supplied (any header case).
+		if headerKeyPresent(headers, hintInfo.header) {
+			continue
+		}
+		headers[hintInfo.header] = []string{hintInfo.value}
 	}
 }
 
-// platformInfo holds platform-specific values for client hints
-type platformInfo struct {
-	Arch            string // e.g., `"x86"`
-	Bitness         string // e.g., `"64"`
-	FullVersionList string // e.g., `"Google Chrome";v="131.0.0.0", ...`
-	Model           string // e.g., `""` for desktop
-	PlatformVersion string // e.g., `"15.0.0"` for macOS, `"10.0.0"` for Windows
-	Wow64           string // e.g., `?0` or `?1`
-}
-
-// getPlatform returns platform info based on the preset being used
-func (s *Session) getPlatform() platformInfo {
-	// Default values for Chrome on Linux x86_64
-	info := platformInfo{
-		Arch:            `"x86"`,
-		Bitness:         `"64"`,
-		Model:           `""`,
-		PlatformVersion: `"6.5.0"`, // Linux kernel version
-		Wow64:           "?0",
-	}
-
-	// Get full version list based on preset
+// resolveClientHints returns the coherent UA client hints for this session's
+// preset. Looking the preset up by name mirrors how the transport built it, so
+// the hints reflect the projected identity rather than the local machine.
+func (s *Session) resolveClientHints() fingerprint.ClientHints {
 	presetName := "chrome-latest"
 	if s.Config != nil && s.Config.Preset != "" {
 		presetName = s.Config.Preset
 	}
-
-	// Generate full version list based on preset
-	// Format: "Brand";v="full.version", ...
-	if contains(presetName, "chrome-131") {
-		info.FullVersionList = `"Google Chrome";v="131.0.6778.86", "Chromium";v="131.0.6778.86", "Not_A Brand";v="24.0.0.0"`
-	} else if contains(presetName, "chrome-133") {
-		info.FullVersionList = `"Google Chrome";v="133.0.6943.98", "Chromium";v="133.0.6943.98", "Not_A Brand";v="24.0.0.0"`
-	} else if contains(presetName, "chrome-141") {
-		info.FullVersionList = `"Google Chrome";v="141.0.7254.112", "Chromium";v="141.0.7254.112", "Not_A Brand";v="24.0.0.0"`
-	} else if contains(presetName, "chrome-143") {
-		info.FullVersionList = `"Google Chrome";v="143.0.7312.86", "Chromium";v="143.0.7312.86", "Not A(Brand";v="24.0.0.0"`
-	} else if contains(presetName, "chrome-144") {
-		info.FullVersionList = `"Not(A:Brand";v="8.0.0.0", "Chromium";v="144.0.7559.132", "Google Chrome";v="144.0.7559.132"`
-	} else {
-		// Default: Chrome 145
-		info.FullVersionList = `"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.7632.75", "Chromium";v="145.0.7632.75"`
+	if p := fingerprint.Get(presetName); p != nil {
+		return p.ResolveClientHints()
 	}
+	return fingerprint.ClientHints{}
+}
 
-	// Adjust platform-specific values
-	if contains(presetName, "windows") {
-		info.PlatformVersion = `"15.0.0"` // Windows 11
-	} else if contains(presetName, "macos") {
-		info.PlatformVersion = `"14.5.0"` // macOS Sonoma
+// headerKeyPresent reports whether headers already contains key, comparing keys
+// case-insensitively (callers may pass "sec-ch-ua-..." while we store the
+// canonical "Sec-Ch-Ua-...").
+func headerKeyPresent(headers map[string][]string, key string) bool {
+	if _, ok := headers[key]; ok {
+		return true
 	}
+	for k := range headers {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
+}
 
-	return info
+// SetClientHintsEnabled toggles all UA client hints (trio + high-entropy) at
+// runtime. When disabled, requests carry only the sec-ch-* headers the caller
+// sets explicitly.
+func (s *Session) SetClientHintsEnabled(enabled bool) {
+	s.mu.Lock()
+	s.clientHintsEnabled = enabled
+	s.mu.Unlock()
+}
+
+// ClientHintsEnabled reports whether UA client hints are currently enabled.
+func (s *Session) ClientHintsEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.clientHintsEnabled
+}
+
+// SetHighEntropyClientHintsEnabled toggles only the high-entropy hints at
+// runtime; the always-on sec-ch-ua trio is unaffected.
+func (s *Session) SetHighEntropyClientHintsEnabled(enabled bool) {
+	s.mu.Lock()
+	s.highEntropyClientHintsEnabled = enabled
+	s.mu.Unlock()
+}
+
+// HighEntropyClientHintsEnabled reports whether the high-entropy hints are
+// currently enabled.
+func (s *Session) HighEntropyClientHintsEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.highEntropyClientHintsEnabled
 }
 
 // Helper functions for client hints
@@ -1082,6 +1181,76 @@ func (s *Session) ClearCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cacheEntries = make(map[string]*cacheEntry)
+}
+
+// SetConditionalCacheEnabled toggles the session's ETag / If-Modified-Since
+// handling at runtime. When false, the session stops injecting cache
+// validators and stops storing them from responses; the existing cache map
+// is preserved (re-enabling will resume using it). To wipe the stored
+// validators, pair this with ClearCache.
+func (s *Session) SetConditionalCacheEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conditionalCacheEnabled = enabled
+}
+
+// ConditionalCacheEnabled reports whether the session is currently injecting
+// and storing ETag / If-Modified-Since validators.
+func (s *Session) ConditionalCacheEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.conditionalCacheEnabled
+}
+
+// SetFollowRedirects toggles the session's redirect-following policy at
+// runtime. Per-request overrides via transport.Request.FollowRedirects still
+// take precedence over this value.
+func (s *Session) SetFollowRedirects(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Config == nil {
+		s.Config = &protocol.SessionConfig{}
+	}
+	s.Config.FollowRedirects = enabled
+}
+
+// SetMaxRedirects updates the session's redirect cap at runtime. A value of
+// zero or below leaves the cap at the prior setting (or the default of 10
+// if none was configured).
+func (s *Session) SetMaxRedirects(max int) {
+	if max <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Config == nil {
+		s.Config = &protocol.SessionConfig{}
+	}
+	s.Config.MaxRedirects = max
+}
+
+// FollowRedirects reports the session's current redirect-following policy.
+// Returns true when the session will follow redirects by default; per-request
+// overrides can still flip the behaviour for a single call.
+func (s *Session) FollowRedirects() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Config == nil {
+		return true
+	}
+	return s.Config.FollowRedirects
+}
+
+// MaxRedirects reports the session's current redirect cap. Returns the
+// configured value, or 10 (the default applied in requestWithRedirects)
+// when nothing has been set.
+func (s *Session) MaxRedirects() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Config == nil || s.Config.MaxRedirects <= 0 {
+		return 10
+	}
+	return s.Config.MaxRedirects
 }
 
 // SetProxy sets or updates the proxy for all protocols (HTTP/1.1, HTTP/2, HTTP/3)
@@ -1396,6 +1565,12 @@ func (s *Session) RequestStream(ctx context.Context, req *transport.Request) (*S
 	}
 	s.mu.Unlock()
 
+	// Resolve client-hint policy for parity with the buffered path: emit coherent
+	// high-entropy hints once the host has advertised Accept-CH, honor the opt-out
+	// knobs, and mark req so the transport strips the trio on a full opt-out.
+	host := extractHost(req.URL)
+	s.applyClientHintPolicy(host, req)
+
 	// Execute streaming request (no retry or redirect support for streams)
 	resp, err := s.transport.DoStream(ctx, req)
 	if err != nil {
@@ -1406,6 +1581,10 @@ func (s *Session) RequestStream(ctx context.Context, req *transport.Request) (*S
 	if !s.Config.WithoutCookieJar {
 		s.extractCookies(resp.Headers, req.URL)
 	}
+
+	// Parse Accept-CH so subsequent requests to this host (buffered or streaming)
+	// send the high-entropy hints, matching the buffered path.
+	s.parseAcceptCH(host, resp.Headers)
 
 	return resp, nil
 }
@@ -1432,6 +1611,30 @@ func (s *Session) PostStream(ctx context.Context, url string, body []byte, heade
 // parseOrigin returns (scheme, host, port) for origin comparison. Missing
 // ports are filled in with the scheme default so http://x:80 and http://x
 // compare equal. Returned values are lowercased.
+// sameOriginReferer returns the previous URL as Chrome puts it in the Referer
+// header on a same-origin hop: the full URL minus the fragment and any userinfo
+// (credentials), with a redundant default port dropped. Chrome never leaks the
+// fragment or credentials in Referer, and serializes the document URL with the
+// default port omitted (https://h:443/a -> https://h/a).
+func sameOriginReferer(prevURL string) string {
+	u, err := url.Parse(prevURL)
+	if err != nil {
+		return ""
+	}
+	u.Fragment = ""
+	u.RawFragment = ""
+	u.User = nil
+	scheme := strings.ToLower(u.Scheme)
+	if p := u.Port(); (scheme == "https" && p == "443") || (scheme == "http" && p == "80") {
+		host := u.Hostname()
+		if strings.Contains(host, ":") { // IPv6 literal needs brackets
+			host = "[" + host + "]"
+		}
+		u.Host = host
+	}
+	return u.String()
+}
+
 func parseOrigin(urlStr string) (scheme, host, port string) {
 	u, err := url.Parse(urlStr)
 	if err != nil || u.Scheme == "" {
@@ -1449,6 +1652,31 @@ func parseOrigin(urlStr string) (scheme, host, port string) {
 		}
 	}
 	return scheme, host, port
+}
+
+// redirectReferer returns the Referer value to send on the next redirect hop,
+// following Chrome's default strict-origin-when-cross-origin policy. prevURL is
+// the URL that issued the 3xx. Returns "" when no Referer should be sent.
+//   - https -> http downgrade: omit (no Referer)
+//   - same-origin: the full previous URL
+//   - cross-origin (same secure scheme): the previous URL's ORIGIN only,
+//     serialized with a trailing slash (e.g. "https://example.com/")
+func redirectReferer(prevURL string, schemeDowngrade, crossOrigin bool) string {
+	if schemeDowngrade {
+		return ""
+	}
+	if !crossOrigin {
+		return sameOriginReferer(prevURL)
+	}
+	scheme, host, port := parseOrigin(prevURL)
+	if scheme == "" || host == "" {
+		return ""
+	}
+	origin := scheme + "://" + host
+	if !((scheme == "https" && port == "443") || (scheme == "http" && port == "80")) {
+		origin += ":" + port
+	}
+	return origin + "/"
 }
 
 // sameOrigin reports whether two URLs share scheme+host+port.

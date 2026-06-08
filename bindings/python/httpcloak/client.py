@@ -126,95 +126,142 @@ class Preset:
 
     Use these constants instead of typing preset strings manually:
         import httpcloak
-        httpcloak.configure(preset=httpcloak.Preset.CHROME_143)
+        httpcloak.configure(preset=httpcloak.Preset.CHROME_LATEST)
 
         # Or with Session
-        session = httpcloak.Session(preset=httpcloak.Preset.FIREFOX_133)
+        session = httpcloak.Session(preset=httpcloak.Preset.FIREFOX_LATEST)
 
-    All available presets:
-        Desktop Chrome: CHROME_146, CHROME_146_WINDOWS, CHROME_146_LINUX, CHROME_146_MACOS
-                        CHROME_145, CHROME_145_WINDOWS, CHROME_145_LINUX, CHROME_145_MACOS
-                        CHROME_144, CHROME_144_WINDOWS, CHROME_144_LINUX, CHROME_144_MACOS
-                        CHROME_143, CHROME_143_WINDOWS, CHROME_143_LINUX, CHROME_143_MACOS
-                        CHROME_141, CHROME_133
-        Mobile Chrome: CHROME_146_IOS, CHROME_145_IOS, CHROME_144_IOS, CHROME_143_IOS,
-                       CHROME_146_ANDROID, CHROME_145_ANDROID, CHROME_144_ANDROID, CHROME_143_ANDROID
-        Firefox: FIREFOX_133
-        Safari: SAFARI_18, SAFARI_17_IOS, SAFARI_18_IOS
+    The constants below mirror the runtime registry shipped by the Go core
+    (call `httpcloak.available_presets()` for the live list at any time).
+    Newest browsers first; the *_LATEST family auto-resolves to the newest
+    version the linked library ships, so client code stays current across
+    minor releases without per-binding constant bumps.
     """
-    # Chrome 146 (latest)
+    # Chrome latest (auto-resolves to newest shipped Chrome)
+    CHROME_LATEST = "chrome-latest"
+    CHROME_LATEST_WINDOWS = "chrome-latest-windows"
+    CHROME_LATEST_LINUX = "chrome-latest-linux"
+    CHROME_LATEST_MACOS = "chrome-latest-macos"
+    CHROME_LATEST_IOS = "chrome-latest-ios"
+    CHROME_LATEST_ANDROID = "chrome-latest-android"
+
+    # Chrome 149 (desktop; wire fingerprint identical to 148)
+    CHROME_149 = "chrome-149"
+    CHROME_149_WINDOWS = "chrome-149-windows"
+    CHROME_149_LINUX = "chrome-149-linux"
+    CHROME_149_MACOS = "chrome-149-macos"
+
+    # Chrome 148
+    CHROME_148 = "chrome-148"
+    CHROME_148_WINDOWS = "chrome-148-windows"
+    CHROME_148_LINUX = "chrome-148-linux"
+    CHROME_148_MACOS = "chrome-148-macos"
+    CHROME_148_IOS = "chrome-148-ios"
+    CHROME_148_ANDROID = "chrome-148-android"
+
+    # Chrome 147
+    CHROME_147 = "chrome-147"
+    CHROME_147_WINDOWS = "chrome-147-windows"
+    CHROME_147_LINUX = "chrome-147-linux"
+    CHROME_147_MACOS = "chrome-147-macos"
+    CHROME_147_IOS = "chrome-147-ios"
+    CHROME_147_ANDROID = "chrome-147-android"
+
+    # Chrome 146
     CHROME_146 = "chrome-146"
     CHROME_146_WINDOWS = "chrome-146-windows"
     CHROME_146_LINUX = "chrome-146-linux"
     CHROME_146_MACOS = "chrome-146-macos"
+    CHROME_146_IOS = "chrome-146-ios"
+    CHROME_146_ANDROID = "chrome-146-android"
 
     # Chrome 145
     CHROME_145 = "chrome-145"
     CHROME_145_WINDOWS = "chrome-145-windows"
     CHROME_145_LINUX = "chrome-145-linux"
     CHROME_145_MACOS = "chrome-145-macos"
+    CHROME_145_IOS = "chrome-145-ios"
+    CHROME_145_ANDROID = "chrome-145-android"
 
     # Chrome 144
     CHROME_144 = "chrome-144"
     CHROME_144_WINDOWS = "chrome-144-windows"
     CHROME_144_LINUX = "chrome-144-linux"
     CHROME_144_MACOS = "chrome-144-macos"
+    CHROME_144_IOS = "chrome-144-ios"
+    CHROME_144_ANDROID = "chrome-144-android"
 
     # Chrome 143
     CHROME_143 = "chrome-143"
     CHROME_143_WINDOWS = "chrome-143-windows"
     CHROME_143_LINUX = "chrome-143-linux"
     CHROME_143_MACOS = "chrome-143-macos"
+    CHROME_143_IOS = "chrome-143-ios"
+    CHROME_143_ANDROID = "chrome-143-android"
 
-    # Chrome 141
+    # Older Chrome (H1/H2 only, no H3)
     CHROME_141 = "chrome-141"
-
-    # Chrome 133
     CHROME_133 = "chrome-133"
 
-    # Mobile Chrome
-    CHROME_143_IOS = "chrome-143-ios"
-    CHROME_144_IOS = "chrome-144-ios"
-    CHROME_145_IOS = "chrome-145-ios"
-    CHROME_146_IOS = "chrome-146-ios"
-    CHROME_143_ANDROID = "chrome-143-android"
-    CHROME_144_ANDROID = "chrome-144-android"
-    CHROME_145_ANDROID = "chrome-145-android"
-    CHROME_146_ANDROID = "chrome-146-android"
-
     # Firefox
+    FIREFOX_LATEST = "firefox-latest"
+    FIREFOX_148 = "firefox-148"
     FIREFOX_133 = "firefox-133"
 
     # Safari (desktop and mobile)
+    SAFARI_LATEST = "safari-latest"
     SAFARI_18 = "safari-18"
     SAFARI_17_IOS = "safari-17-ios"
     SAFARI_18_IOS = "safari-18-ios"
+    SAFARI_LATEST_IOS = "safari-latest-ios"
 
-    # Backwards compatibility aliases (old naming convention)
+    # Backwards compatibility aliases (old naming convention used "ios-chrome" / "android-chrome" prefix)
     IOS_CHROME_143 = CHROME_143_IOS
     IOS_CHROME_144 = CHROME_144_IOS
     IOS_CHROME_145 = CHROME_145_IOS
     IOS_CHROME_146 = CHROME_146_IOS
+    IOS_CHROME_147 = CHROME_147_IOS
+    IOS_CHROME_148 = CHROME_148_IOS
+    IOS_CHROME_LATEST = CHROME_LATEST_IOS
     ANDROID_CHROME_143 = CHROME_143_ANDROID
     ANDROID_CHROME_144 = CHROME_144_ANDROID
     ANDROID_CHROME_145 = CHROME_145_ANDROID
     ANDROID_CHROME_146 = CHROME_146_ANDROID
+    ANDROID_CHROME_147 = CHROME_147_ANDROID
+    ANDROID_CHROME_148 = CHROME_148_ANDROID
+    ANDROID_CHROME_LATEST = CHROME_LATEST_ANDROID
     IOS_SAFARI_17 = SAFARI_17_IOS
     IOS_SAFARI_18 = SAFARI_18_IOS
+    IOS_SAFARI_LATEST = SAFARI_LATEST_IOS
 
     @classmethod
     def all(cls) -> List[str]:
-        """Return list of all available preset names."""
+        """
+        Return list of all built-in preset names known to this binding version.
+
+        For the authoritative live list (which may include custom presets loaded
+        at runtime), call `httpcloak.available_presets()` instead.
+        """
         return [
+            cls.CHROME_LATEST, cls.CHROME_LATEST_WINDOWS, cls.CHROME_LATEST_LINUX,
+            cls.CHROME_LATEST_MACOS, cls.CHROME_LATEST_IOS, cls.CHROME_LATEST_ANDROID,
+            cls.CHROME_149, cls.CHROME_149_WINDOWS, cls.CHROME_149_LINUX, cls.CHROME_149_MACOS,
+            cls.CHROME_148, cls.CHROME_148_WINDOWS, cls.CHROME_148_LINUX, cls.CHROME_148_MACOS,
+            cls.CHROME_148_IOS, cls.CHROME_148_ANDROID,
+            cls.CHROME_147, cls.CHROME_147_WINDOWS, cls.CHROME_147_LINUX, cls.CHROME_147_MACOS,
+            cls.CHROME_147_IOS, cls.CHROME_147_ANDROID,
             cls.CHROME_146, cls.CHROME_146_WINDOWS, cls.CHROME_146_LINUX, cls.CHROME_146_MACOS,
+            cls.CHROME_146_IOS, cls.CHROME_146_ANDROID,
             cls.CHROME_145, cls.CHROME_145_WINDOWS, cls.CHROME_145_LINUX, cls.CHROME_145_MACOS,
+            cls.CHROME_145_IOS, cls.CHROME_145_ANDROID,
             cls.CHROME_144, cls.CHROME_144_WINDOWS, cls.CHROME_144_LINUX, cls.CHROME_144_MACOS,
+            cls.CHROME_144_IOS, cls.CHROME_144_ANDROID,
             cls.CHROME_143, cls.CHROME_143_WINDOWS, cls.CHROME_143_LINUX, cls.CHROME_143_MACOS,
+            cls.CHROME_143_IOS, cls.CHROME_143_ANDROID,
             cls.CHROME_141, cls.CHROME_133,
-            cls.CHROME_146_IOS, cls.CHROME_145_IOS, cls.CHROME_144_IOS, cls.CHROME_143_IOS,
-            cls.CHROME_146_ANDROID, cls.CHROME_145_ANDROID, cls.CHROME_144_ANDROID, cls.CHROME_143_ANDROID,
-            cls.FIREFOX_133,
-            cls.SAFARI_18, cls.SAFARI_17_IOS, cls.SAFARI_18_IOS,
+            cls.FIREFOX_LATEST, cls.FIREFOX_148, cls.FIREFOX_133,
+            cls.SAFARI_LATEST, cls.SAFARI_18, cls.SAFARI_17_IOS, cls.SAFARI_18_IOS,
+            cls.SAFARI_LATEST_IOS,
         ]
 
 
@@ -932,6 +979,11 @@ class _AsyncCallbackManager:
 
         Each request gets a unique callback_id from Go. The callback function
         is shared but Go tracks each request separately by ID.
+
+        When the returned future is cancelled (e.g. via asyncio.wait_for timeout
+        or task.cancel()), the in-flight Go request is also cancelled — that
+        unblocks the goroutine, closes any pending DNS/TCP/TLS work, and stops
+        leaking work to the cgo side.
         """
         self._ensure_callback(lib)
 
@@ -944,6 +996,29 @@ class _AsyncCallbackManager:
         start_time = time.perf_counter()
         with self._lock:
             self._pending[callback_id] = (future, loop, start_time)
+
+        # Wire future cancellation through to the Go-side cancel function.
+        # add_done_callback fires for any future completion path; the cancel
+        # path is only meaningful while the request is still pending on the
+        # Go side. Order matters:
+        #   1) cancel_request unblocks the goroutine (ctx.Done fires)
+        #   2) unregister_callback removes the entry from Go's asyncCallbacks
+        #      map so the goroutine's final invokeCallback() finds !exists and
+        #      returns silently. Without this, Go would still try to deliver
+        #      a result via call_soon_threadsafe → set_exception on an already-
+        #      cancelled future, which raises InvalidStateError.
+        # Also drop the pending entry so a late callback delivery becomes a
+        # no-op on the Python side too.
+        def _on_future_done(fut: asyncio.Future, _cid: int = callback_id, _lib=lib, _self=self) -> None:
+            if fut.cancelled():
+                try:
+                    _lib.httpcloak_cancel_request(_cid)
+                    _lib.httpcloak_unregister_callback(_cid)
+                except Exception:
+                    pass
+                with _self._lock:
+                    _self._pending.pop(_cid, None)
+        future.add_done_callback(_on_future_done)
 
         return callback_id, future
 
@@ -992,6 +1067,36 @@ def _setup_lib(lib):
     lib.httpcloak_delete_cookie.restype = None
     lib.httpcloak_clear_cookies.argtypes = [c_int64]
     lib.httpcloak_clear_cookies.restype = None
+    lib.httpcloak_session_clear_cache.argtypes = [c_int64]
+    lib.httpcloak_session_clear_cache.restype = None
+    lib.httpcloak_session_stats.argtypes = [c_int64]
+    lib.httpcloak_session_stats.restype = c_void_p
+    lib.httpcloak_session_idle_time.argtypes = [c_int64]
+    lib.httpcloak_session_idle_time.restype = c_int64
+    lib.httpcloak_session_is_active.argtypes = [c_int64]
+    lib.httpcloak_session_is_active.restype = c_int
+    lib.httpcloak_session_touch.argtypes = [c_int64]
+    lib.httpcloak_session_touch.restype = None
+    lib.httpcloak_session_set_conditional_cache.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_conditional_cache.restype = None
+    lib.httpcloak_session_get_conditional_cache.argtypes = [c_int64]
+    lib.httpcloak_session_get_conditional_cache.restype = c_int
+    lib.httpcloak_session_set_client_hints.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_client_hints.restype = None
+    lib.httpcloak_session_get_client_hints.argtypes = [c_int64]
+    lib.httpcloak_session_get_client_hints.restype = c_int
+    lib.httpcloak_session_set_high_entropy_client_hints.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_high_entropy_client_hints.restype = None
+    lib.httpcloak_session_get_high_entropy_client_hints.argtypes = [c_int64]
+    lib.httpcloak_session_get_high_entropy_client_hints.restype = c_int
+    lib.httpcloak_session_set_follow_redirects.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_follow_redirects.restype = None
+    lib.httpcloak_session_get_follow_redirects.argtypes = [c_int64]
+    lib.httpcloak_session_get_follow_redirects.restype = c_int
+    lib.httpcloak_session_set_max_redirects.argtypes = [c_int64, c_int]
+    lib.httpcloak_session_set_max_redirects.restype = None
+    lib.httpcloak_session_get_max_redirects.argtypes = [c_int64]
+    lib.httpcloak_session_get_max_redirects.restype = c_int
     lib.httpcloak_free_string.argtypes = [c_void_p]
     lib.httpcloak_free_string.restype = None
     lib.httpcloak_version.argtypes = []
@@ -1014,6 +1119,8 @@ def _setup_lib(lib):
     lib.httpcloak_post_async.restype = None
     lib.httpcloak_request_async.argtypes = [c_int64, c_char_p, c_int64]
     lib.httpcloak_request_async.restype = None
+    lib.httpcloak_cancel_request.argtypes = [c_int64]
+    lib.httpcloak_cancel_request.restype = None
 
     # Streaming functions
     lib.httpcloak_stream_get.argtypes = [c_int64, c_char_p, c_char_p]
@@ -1104,6 +1211,10 @@ def _setup_lib(lib):
     lib.httpcloak_local_proxy_register_session.restype = c_void_p
     lib.httpcloak_local_proxy_unregister_session.argtypes = [c_int64, c_char_p]
     lib.httpcloak_local_proxy_unregister_session.restype = c_int
+    lib.httpcloak_local_proxy_list_sessions.argtypes = [c_int64]
+    lib.httpcloak_local_proxy_list_sessions.restype = c_void_p
+    lib.httpcloak_local_proxy_has_session.argtypes = [c_int64, c_char_p]
+    lib.httpcloak_local_proxy_has_session.restype = c_int
 
     # Session cache callbacks
     lib.httpcloak_set_session_cache_callbacks.argtypes = [
@@ -1451,6 +1562,8 @@ class Session:
         prefer_ipv4: Prefer IPv4 addresses over IPv6 (default: False)
         connect_to: Domain fronting map {request_host: connect_host} - DNS resolves connect_host but SNI/Host uses request_host
         ech_config_domain: Domain to fetch ECH config from (e.g., "cloudflare-ech.com" for any CF domain)
+        disable_ech: Skip the ECH (Encrypted Client Hello) HTTPS RR lookup entirely (default: False).
+            Saves ~15-20ms on first connect at the cost of the privacy bump ECH provides.
         tls_only: TLS-only mode - skip preset HTTP headers, only apply TLS fingerprint (default: False)
         quic_idle_timeout: QUIC connection idle timeout in seconds (default: 30). Set higher for long-lived H3 connections.
         local_address: Local IP address to bind outgoing connections to (e.g., "192.168.1.100" or "::1")
@@ -1512,6 +1625,11 @@ class Session:
         enable_speculative_tls: bool = False,
         switch_protocol: Optional[str] = None,
         without_cookie_jar: bool = False,
+        without_conditional_cache: bool = False,
+        without_client_hints: bool = False,
+        without_high_entropy_client_hints: bool = False,
+        disable_ech: bool = False,
+        disable_http3: bool = False,
         ja3: Optional[str] = None,
         akamai: Optional[str] = None,
         extra_fp: Optional[Dict[str, any]] = None,
@@ -1567,6 +1685,16 @@ class Session:
             config["switch_protocol"] = switch_protocol
         if without_cookie_jar:
             config["without_cookie_jar"] = True
+        if without_conditional_cache:
+            config["without_conditional_cache"] = True
+        if without_client_hints:
+            config["without_client_hints"] = True
+        if without_high_entropy_client_hints:
+            config["without_high_entropy_client_hints"] = True
+        if disable_ech:
+            config["disable_ech"] = True
+        if disable_http3:
+            config["disable_http3"] = True
         if ja3:
             config["ja3"] = ja3
         if akamai:
@@ -1808,6 +1936,10 @@ class Session:
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """
         Perform a POST request.
@@ -1887,7 +2019,7 @@ class Session:
         merged_headers = self._apply_cookies(merged_headers, cookies)
 
         if timeout:
-            return self.request("POST", url, headers=merged_headers, data=body, timeout=timeout, fetch_mode=fetch_mode)
+            return self.request("POST", url, headers=merged_headers, data=body, timeout=timeout, fetch_mode=fetch_mode, allow_redirects=allow_redirects, disable_conditional_cache=disable_conditional_cache, disable_client_hints=disable_client_hints, disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
         # Build options JSON with headers wrapper (clib expects {"headers": {...}})
         options = {}
@@ -1895,6 +2027,14 @@ class Session:
             options["headers"] = merged_headers
         if fetch_mode:
             options["fetch_mode"] = fetch_mode
+        if allow_redirects is not None:
+            options["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            options["disable_conditional_cache"] = True
+        if disable_client_hints:
+            options["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            options["disable_high_entropy_client_hints"] = True
         options_json = json_module.dumps(options).encode("utf-8") if options else None
 
         body_len = len(body) if body else 0
@@ -1927,6 +2067,10 @@ class Session:
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """
         Perform a custom HTTP request.
@@ -1990,6 +2134,14 @@ class Session:
             request_config["timeout"] = int(timeout * 1000)
         if fetch_mode:
             request_config["fetch_mode"] = fetch_mode
+        if allow_redirects is not None:
+            request_config["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            request_config["disable_conditional_cache"] = True
+        if disable_client_hints:
+            request_config["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            request_config["disable_high_entropy_client_hints"] = True
 
         body_len = len(body_bytes) if body_bytes else 0
 
@@ -2019,9 +2171,13 @@ class Session:
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """Perform a PUT request."""
-        return self.request("PUT", url, params=params, data=data, json=json, files=files, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode)
+        return self.request("PUT", url, params=params, data=data, json=json, files=files, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode, allow_redirects=allow_redirects, disable_conditional_cache=disable_conditional_cache, disable_client_hints=disable_client_hints, disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
     def delete(
         self,
@@ -2032,9 +2188,13 @@ class Session:
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """Perform a DELETE request."""
-        return self.request("DELETE", url, params=params, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode)
+        return self.request("DELETE", url, params=params, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode, allow_redirects=allow_redirects, disable_conditional_cache=disable_conditional_cache, disable_client_hints=disable_client_hints, disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
     def patch(
         self,
@@ -2048,9 +2208,13 @@ class Session:
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """Perform a PATCH request."""
-        return self.request("PATCH", url, params=params, data=data, json=json, files=files, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode)
+        return self.request("PATCH", url, params=params, data=data, json=json, files=files, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode, allow_redirects=allow_redirects, disable_conditional_cache=disable_conditional_cache, disable_client_hints=disable_client_hints, disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
     def head(
         self,
@@ -2061,9 +2225,13 @@ class Session:
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """Perform a HEAD request."""
-        return self.request("HEAD", url, params=params, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode)
+        return self.request("HEAD", url, params=params, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode, allow_redirects=allow_redirects, disable_conditional_cache=disable_conditional_cache, disable_client_hints=disable_client_hints, disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
     def options(
         self,
@@ -2074,9 +2242,13 @@ class Session:
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """Perform an OPTIONS request."""
-        return self.request("OPTIONS", url, params=params, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode)
+        return self.request("OPTIONS", url, params=params, headers=headers, cookies=cookies, auth=auth, timeout=timeout, fetch_mode=fetch_mode, allow_redirects=allow_redirects, disable_conditional_cache=disable_conditional_cache, disable_client_hints=disable_client_hints, disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
     # =========================================================================
     # Async Methods (Native - using Go goroutines)
@@ -2090,6 +2262,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """
         Async GET request using native Go goroutines.
@@ -2120,6 +2296,14 @@ class Session:
             options["headers"] = merged_headers
         if fetch_mode:
             options["fetch_mode"] = fetch_mode
+        if allow_redirects is not None:
+            options["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            options["disable_conditional_cache"] = True
+        if disable_client_hints:
+            options["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            options["disable_high_entropy_client_hints"] = True
         options_json = json.dumps(options).encode("utf-8") if options else None
 
         # Start async request
@@ -2143,6 +2327,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """
         Async POST request using native Go goroutines.
@@ -2194,6 +2382,14 @@ class Session:
             options["headers"] = merged_headers
         if fetch_mode:
             options["fetch_mode"] = fetch_mode
+        if allow_redirects is not None:
+            options["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            options["disable_conditional_cache"] = True
+        if disable_client_hints:
+            options["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            options["disable_high_entropy_client_hints"] = True
         options_json = json.dumps(options).encode("utf-8") if options else None
 
         # Start async request
@@ -2219,6 +2415,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Response:
         """
         Async custom HTTP request using native Go goroutines.
@@ -2238,10 +2438,12 @@ class Session:
         merged_headers = self._merge_headers(headers)
 
         body = None
+        body_encoding = ""
         if files is not None:
             form_data = data if isinstance(data, dict) else None
             body_bytes, content_type = _encode_multipart(data=form_data, files=files)
-            body = body_bytes.decode("latin-1")
+            body = base64.b64encode(body_bytes).decode("ascii")
+            body_encoding = "base64"
             merged_headers = merged_headers or {}
             merged_headers["Content-Type"] = content_type
         elif json_data is not None:
@@ -2254,7 +2456,8 @@ class Session:
                 merged_headers = merged_headers or {}
                 merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
             elif isinstance(data, bytes):
-                body = data.decode("utf-8")
+                body = base64.b64encode(data).decode("ascii")
+                body_encoding = "base64"
             else:
                 body = data
 
@@ -2271,8 +2474,18 @@ class Session:
             request_config["headers"] = merged_headers
         if body:
             request_config["body"] = body
+        if body_encoding:
+            request_config["body_encoding"] = body_encoding
         if fetch_mode:
             request_config["fetch_mode"] = fetch_mode
+        if allow_redirects is not None:
+            request_config["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            request_config["disable_conditional_cache"] = True
+        if disable_client_hints:
+            request_config["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            request_config["disable_high_entropy_client_hints"] = True
 
         # Get async manager and register this request (each request gets unique ID)
         manager = _get_async_manager()
@@ -2434,6 +2647,134 @@ class Session:
     def clear_cookies(self):
         """Clear all cookies from the session."""
         self._lib.httpcloak_clear_cookies(self._handle)
+
+    # =========================================================================
+    # Conditional Cache and Redirect Runtime Control
+    # =========================================================================
+
+    def clear_cache(self) -> None:
+        """
+        Drop the session's per-URL conditional-cache map (ETag / Last-Modified).
+        The next request to each URL goes out without If-None-Match /
+        If-Modified-Since headers. Cookies and TLS tickets are not touched.
+        """
+        self._lib.httpcloak_session_clear_cache(self._handle)
+
+    def stats(self) -> Dict[str, Any]:
+        """
+        Return a snapshot of session counters, timestamps, and transport-level
+        metrics. Keys: ``id``, ``preset``, ``created_at`` (Unix ns),
+        ``last_used`` (Unix ns), ``request_count``, ``active``,
+        ``cookie_count``, ``cache_entry_count``, ``age_ns``, ``idle_time_ns``,
+        ``transport_stats`` (per-protocol dict).
+
+        Useful for long-running scrapers that want per-session metrics
+        scraped into Prometheus / Datadog / etc.
+        """
+        result_ptr = self._lib.httpcloak_session_stats(self._handle)
+        if not result_ptr:
+            return {}
+        try:
+            raw = cast(result_ptr, c_char_p).value
+            if raw is None:
+                return {}
+            return json.loads(raw.decode("utf-8"))
+        finally:
+            self._lib.httpcloak_free_string(result_ptr)
+
+    def idle_time(self) -> float:
+        """
+        Return the time since the session last serviced a request, in seconds.
+        Returns -1.0 if the session handle is closed.
+        """
+        ns = self._lib.httpcloak_session_idle_time(self._handle)
+        if ns < 0:
+            return -1.0
+        return ns / 1_000_000_000.0
+
+    def is_active(self) -> bool:
+        """
+        Return True if the session is still usable (i.e. ``close()`` has not
+        been called and the handle is valid).
+        """
+        return self._lib.httpcloak_session_is_active(self._handle) == 1
+
+    def touch(self) -> None:
+        """
+        Reset the idle timer to now without issuing a request. Useful in
+        long-running pools where an external heartbeat shouldn't let a
+        session look idle to a reaper.
+        """
+        self._lib.httpcloak_session_touch(self._handle)
+
+    def set_conditional_cache(self, enabled: bool) -> None:
+        """
+        Toggle the session's ETag / If-Modified-Since handling at runtime.
+
+        When disabled, the session stops injecting cache validators on
+        outgoing requests and stops storing them from responses; the existing
+        cache map is preserved (re-enabling resumes using it). Pair with
+        :meth:`clear_cache` to also wipe previously-stored validators.
+        """
+        self._lib.httpcloak_session_set_conditional_cache(self._handle, 1 if enabled else 0)
+
+    def get_conditional_cache(self) -> bool:
+        """Return the session's current conditional-cache state."""
+        return self._lib.httpcloak_session_get_conditional_cache(self._handle) != 0
+
+    def set_client_hints(self, enabled: bool) -> None:
+        """
+        Toggle the session's client-hint headers at runtime (full strip).
+
+        When disabled, the session stops emitting ALL sec-ch-ua headers,
+        including the always-on trio (sec-ch-ua, sec-ch-ua-mobile,
+        sec-ch-ua-platform) as well as the Accept-CH high-entropy hints. The
+        change takes effect on the next request and persists until set again.
+        """
+        self._lib.httpcloak_session_set_client_hints(self._handle, 1 if enabled else 0)
+
+    def get_client_hints(self) -> bool:
+        """Return the session's current client-hints state."""
+        return self._lib.httpcloak_session_get_client_hints(self._handle) != 0
+
+    def set_high_entropy_client_hints(self, enabled: bool) -> None:
+        """
+        Toggle the session's high-entropy client-hint headers at runtime.
+
+        When disabled, the session keeps the always-on trio (sec-ch-ua,
+        sec-ch-ua-mobile, sec-ch-ua-platform) but drops only the Accept-CH
+        high-entropy hints. The change takes effect on the next request and
+        persists until set again.
+        """
+        self._lib.httpcloak_session_set_high_entropy_client_hints(self._handle, 1 if enabled else 0)
+
+    def get_high_entropy_client_hints(self) -> bool:
+        """Return the session's current high-entropy client-hints state."""
+        return self._lib.httpcloak_session_get_high_entropy_client_hints(self._handle) != 0
+
+    def set_follow_redirects(self, enabled: bool) -> None:
+        """
+        Toggle the session's redirect-following policy at runtime. The change
+        takes effect on the next request and persists until set again.
+        Per-request overrides on :meth:`request` / :meth:`request_async`
+        still win over this value for that one call.
+        """
+        self._lib.httpcloak_session_set_follow_redirects(self._handle, 1 if enabled else 0)
+
+    def get_follow_redirects(self) -> bool:
+        """Return the session's current redirect-following policy."""
+        return self._lib.httpcloak_session_get_follow_redirects(self._handle) != 0
+
+    def set_max_redirects(self, max_redirects: int) -> None:
+        """
+        Update the session's redirect cap at runtime. Values of zero or below
+        are ignored, leaving the prior cap (or the default of 10) in place.
+        """
+        self._lib.httpcloak_session_set_max_redirects(self._handle, max_redirects)
+
+    def get_max_redirects(self) -> int:
+        """Return the session's current redirect cap."""
+        return self._lib.httpcloak_session_get_max_redirects(self._handle)
 
     @property
     def cookies(self) -> Dict[str, str]:
@@ -2739,6 +3080,10 @@ class Session:
         timeout: Optional[int] = None,
         stream: bool = False,
         fetch_mode: Optional[str] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> Union[Response, StreamResponse]:
         """
         Perform a GET request.
@@ -2769,7 +3114,11 @@ class Session:
         effective_auth = auth if auth is not None else self.auth
 
         if stream:
-            return self._get_stream(url, params, headers, cookies, effective_auth, timeout)
+            return self._get_stream(url, params, headers, cookies, effective_auth, timeout,
+                                    allow_redirects=allow_redirects,
+                                    disable_conditional_cache=disable_conditional_cache,
+                                    disable_client_hints=disable_client_hints,
+                                    disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
         # Regular request (existing implementation)
         url = _add_params_to_url(url, params)
@@ -2778,7 +3127,12 @@ class Session:
         merged_headers = self._apply_cookies(merged_headers, cookies)
 
         if timeout:
-            return self.request("GET", url, headers=merged_headers, timeout=timeout, fetch_mode=fetch_mode)
+            return self.request("GET", url, headers=merged_headers, timeout=timeout,
+                                fetch_mode=fetch_mode,
+                                allow_redirects=allow_redirects,
+                                disable_conditional_cache=disable_conditional_cache,
+                                disable_client_hints=disable_client_hints,
+                                disable_high_entropy_client_hints=disable_high_entropy_client_hints)
 
         # Build options JSON with headers wrapper (clib expects {"headers": {...}})
         options = {}
@@ -2786,6 +3140,14 @@ class Session:
             options["headers"] = merged_headers
         if fetch_mode:
             options["fetch_mode"] = fetch_mode
+        if allow_redirects is not None:
+            options["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            options["disable_conditional_cache"] = True
+        if disable_client_hints:
+            options["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            options["disable_high_entropy_client_hints"] = True
         options_json = json.dumps(options).encode("utf-8") if options else None
 
         start_time = time.perf_counter()
@@ -3142,6 +3504,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> StreamResponse:
         """Internal method to perform a streaming GET request."""
         url = _add_params_to_url(url, params)
@@ -3155,6 +3521,14 @@ class Session:
             options["headers"] = merged_headers
         if timeout:
             options["timeout"] = timeout
+        if allow_redirects is not None:
+            options["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            options["disable_conditional_cache"] = True
+        if disable_client_hints:
+            options["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            options["disable_high_entropy_client_hints"] = True
         options_json = json.dumps(options).encode("utf-8") if options else None
 
         # Start stream
@@ -3186,6 +3560,13 @@ class Session:
                 cookies_list.append(Cookie(
                     name=cookie_data.get("name", ""),
                     value=cookie_data.get("value", ""),
+                    domain=cookie_data.get("domain", ""),
+                    path=cookie_data.get("path", ""),
+                    expires=cookie_data.get("expires", ""),
+                    max_age=cookie_data.get("max_age", 0),
+                    secure=cookie_data.get("secure", False),
+                    http_only=cookie_data.get("http_only", False),
+                    same_site=cookie_data.get("same_site", ""),
                 ))
 
         return StreamResponse(
@@ -3209,6 +3590,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> StreamResponse:
         """
         Perform a streaming POST request.
@@ -3254,6 +3639,14 @@ class Session:
             options["headers"] = merged_headers
         if timeout:
             options["timeout"] = timeout
+        if allow_redirects is not None:
+            options["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            options["disable_conditional_cache"] = True
+        if disable_client_hints:
+            options["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            options["disable_high_entropy_client_hints"] = True
         options_json = json.dumps(options).encode("utf-8") if options else None
 
         # Start stream
@@ -3286,6 +3679,13 @@ class Session:
                 cookies_list.append(Cookie(
                     name=cookie_data.get("name", ""),
                     value=cookie_data.get("value", ""),
+                    domain=cookie_data.get("domain", ""),
+                    path=cookie_data.get("path", ""),
+                    expires=cookie_data.get("expires", ""),
+                    max_age=cookie_data.get("max_age", 0),
+                    secure=cookie_data.get("secure", False),
+                    http_only=cookie_data.get("http_only", False),
+                    same_site=cookie_data.get("same_site", ""),
                 ))
 
         return StreamResponse(
@@ -3309,6 +3709,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> StreamResponse:
         """
         Perform a streaming HTTP request with any method.
@@ -3346,6 +3750,14 @@ class Session:
                 request_config["body"] = data
         if timeout:
             request_config["timeout"] = timeout
+        if allow_redirects is not None:
+            request_config["follow_redirects"] = bool(allow_redirects)
+        if disable_conditional_cache:
+            request_config["disable_conditional_cache"] = True
+        if disable_client_hints:
+            request_config["disable_client_hints"] = True
+        if disable_high_entropy_client_hints:
+            request_config["disable_high_entropy_client_hints"] = True
 
         # Start stream
         stream_handle = self._lib.httpcloak_stream_request(
@@ -3375,6 +3787,13 @@ class Session:
                 cookies_list.append(Cookie(
                     name=cookie_data.get("name", ""),
                     value=cookie_data.get("value", ""),
+                    domain=cookie_data.get("domain", ""),
+                    path=cookie_data.get("path", ""),
+                    expires=cookie_data.get("expires", ""),
+                    max_age=cookie_data.get("max_age", 0),
+                    secure=cookie_data.get("secure", False),
+                    http_only=cookie_data.get("http_only", False),
+                    same_site=cookie_data.get("same_site", ""),
                 ))
 
         return StreamResponse(
@@ -3396,6 +3815,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> StreamResponse:
         """
         Perform a streaming GET request.
@@ -3407,6 +3830,10 @@ class Session:
             cookies: Cookies to send with this request
             auth: Basic auth tuple (username, password)
             timeout: Request timeout in milliseconds
+            allow_redirects: Override the session redirect policy for this request
+            disable_conditional_cache: Skip ETag / If-Modified-Since for this request
+            disable_client_hints: Drop ALL sec-ch-ua headers (incl the always-on trio) for this request
+            disable_high_entropy_client_hints: Keep the trio, drop only the Accept-CH high-entropy hints for this request
 
         Returns:
             StreamResponse for streaming the response body
@@ -3419,6 +3846,10 @@ class Session:
         return self._get_stream(
             url, params=params, headers=headers,
             cookies=cookies, auth=auth, timeout=timeout,
+            allow_redirects=allow_redirects,
+            disable_conditional_cache=disable_conditional_cache,
+            disable_client_hints=disable_client_hints,
+            disable_high_entropy_client_hints=disable_high_entropy_client_hints,
         )
 
     def put_stream(
@@ -3431,6 +3862,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> StreamResponse:
         """
         Perform a streaming PUT request.
@@ -3469,6 +3904,10 @@ class Session:
         return self.request_stream(
             "PUT", url, data=body, headers=merged_headers,
             cookies=cookies, auth=auth, timeout=timeout,
+            allow_redirects=allow_redirects,
+            disable_conditional_cache=disable_conditional_cache,
+            disable_client_hints=disable_client_hints,
+            disable_high_entropy_client_hints=disable_high_entropy_client_hints,
         )
 
     def delete_stream(
@@ -3479,6 +3918,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> StreamResponse:
         """
         Perform a streaming DELETE request.
@@ -3497,6 +3940,10 @@ class Session:
         return self.request_stream(
             "DELETE", url, params=params, headers=headers,
             cookies=cookies, auth=auth, timeout=timeout,
+            allow_redirects=allow_redirects,
+            disable_conditional_cache=disable_conditional_cache,
+            disable_client_hints=disable_client_hints,
+            disable_high_entropy_client_hints=disable_high_entropy_client_hints,
         )
 
     def patch_stream(
@@ -3509,6 +3956,10 @@ class Session:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[Tuple[str, str]] = None,
         timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        disable_conditional_cache: bool = False,
+        disable_client_hints: bool = False,
+        disable_high_entropy_client_hints: bool = False,
     ) -> StreamResponse:
         """
         Perform a streaming PATCH request.
@@ -3547,6 +3998,10 @@ class Session:
         return self.request_stream(
             "PATCH", url, data=body, headers=merged_headers,
             cookies=cookies, auth=auth, timeout=timeout,
+            allow_redirects=allow_redirects,
+            disable_conditional_cache=disable_conditional_cache,
+            disable_client_hints=disable_client_hints,
+            disable_high_entropy_client_hints=disable_high_entropy_client_hints,
         )
 
 
@@ -4024,6 +4479,42 @@ class LocalProxy:
             self._handle, session_id_bytes
         )
         return result == 1
+
+    def list_sessions(self) -> List[str]:
+        """
+        Return the IDs of every session currently registered on this proxy.
+
+        These are the same IDs that the X-HTTPCloak-Session header accepts
+        for per-request session routing. Useful for sanity checks, GC of
+        stale registrations in long-running processes, and operational
+        dashboards.
+        """
+        result_ptr = self._lib.httpcloak_local_proxy_list_sessions(self._handle)
+        if not result_ptr:
+            return []
+        try:
+            raw = cast(result_ptr, c_char_p).value
+            if raw is None:
+                return []
+            ids = json.loads(raw.decode("utf-8"))
+            if isinstance(ids, list):
+                return [str(x) for x in ids]
+            return []
+        finally:
+            self._lib.httpcloak_free_string(result_ptr)
+
+    def has_session(self, session_id: str) -> bool:
+        """
+        Return True if a session with the given ID is currently registered.
+
+        Cheaper than calling list_sessions() and scanning when callers only
+        need an existence check.
+        """
+        if not session_id:
+            return False
+        return self._lib.httpcloak_local_proxy_has_session(
+            self._handle, session_id.encode("utf-8")
+        ) == 1
 
     def close(self) -> None:
         """Stop the local proxy server."""

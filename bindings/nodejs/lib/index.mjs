@@ -22,9 +22,16 @@ export const Cookie = cjs.Cookie;
 export const RedirectInfo = cjs.RedirectInfo;
 export const HTTPCloakError = cjs.HTTPCloakError;
 export const SessionCacheBackend = cjs.SessionCacheBackend;
+export const PresetPool = cjs.PresetPool;
 
 // Presets
 export const Preset = cjs.Preset;
+
+// Custom preset loading
+export const loadPreset = cjs.loadPreset;
+export const loadPresetFromJSON = cjs.loadPresetFromJSON;
+export const unregisterPreset = cjs.unregisterPreset;
+export const describePreset = cjs.describePreset;
 
 // Configuration
 export const configure = cjs.configure;

@@ -153,6 +153,10 @@ func (s *Session) forkOne() *Session {
 		cookies:        s.cookies, // shared pointer — thread-safe CookieJar
 		cacheEntries:   cacheEntries,
 		clientHints:    clientHints,
+		// Inherit the parent's runtime client-hint gates (read under the RLock
+		// Fork holds), so forks behave like the parent rather than defaulting off.
+		clientHintsEnabled:            s.clientHintsEnabled,
+		highEntropyClientHintsEnabled: s.highEntropyClientHintsEnabled,
 		keyLogWriter:   nil, // no key log on fork to avoid double-close
 		switchProtocol: switchProto,
 		active:         true,

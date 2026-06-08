@@ -42,6 +42,8 @@ temp/
 tests/
 # Internal tests (not published)
 internal_tests/
+# Root-level _test.go files stay local (subdir tests still ship)
+/*_test.go
 
 # Local workspace config (points at machine-local fork paths)
 go.work
@@ -57,7 +59,12 @@ debug.md
 features.md
 browser_import_plan.md
 ech_fix.md
-docs/
+
+# Public docs site (Docusaurus) — tracked. Only the build artifacts ignored.
+docs/node_modules/
+docs/build/
+docs/.docusaurus/
+docs/.cache-loader/
 
 # Temp images
 image copy*.png

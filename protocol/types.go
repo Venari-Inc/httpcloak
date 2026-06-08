@@ -1,8 +1,12 @@
-// Package protocol defines the IPC message types for communication between
-// the httpcloak daemon and language SDKs (Python, Node.js, etc.)
+// Package protocol defines the JSON-shaped session configuration types that
+// the cgo entry points in bindings/clib consume from the language SDKs.
 //
-// The daemon reads JSON messages from stdin and writes responses to stdout.
-// Each message is a single JSON object followed by a newline.
+// The original design called for a separate httpcloak-daemon binary that
+// would speak JSON over stdin/stdout, which is why this package still ships
+// the MessageType / SessionCreateRequest / Response shapes. That daemon was
+// never released. The bindings (Python, Node.js, .NET) link against the
+// cgo-built shared library directly and call the C entry points; SessionConfig
+// here is the shape the root package's NewSession marshals internally.
 package protocol
 
 // MessageType represents the type of IPC message
@@ -71,6 +75,12 @@ type RequestOptions struct {
 
 	// Disable retry for this request
 	DisableRetry bool `json:"disableRetry,omitempty"`
+
+	// DisableConditionalCache skips injection of If-None-Match / If-Modified-Since
+	// headers from the session's per-URL cache for this request AND skips storing
+	// any ETag / Last-Modified from the response. Lets callers force a fresh fetch
+	// without touching the session-wide setting.
+	DisableConditionalCache bool `json:"disableConditionalCache,omitempty"`
 
 	// User-Agent override (empty = use preset)
 	UserAgent string `json:"userAgent,omitempty"`
@@ -217,6 +227,26 @@ type SessionConfig struct {
 	// headers — useful when an application maintains its own jar (database,
 	// shared cache) and wants the lib to be byte-transparent.
 	WithoutCookieJar bool `json:"withoutCookieJar,omitempty"`
+
+	// WithoutConditionalCache disables the session's per-URL ETag /
+	// Last-Modified handling entirely. When true, the session never injects
+	// If-None-Match or If-Modified-Since headers and never stores those
+	// validators from responses. Toggle at runtime with
+	// Session.SetConditionalCacheEnabled(bool).
+	WithoutConditionalCache bool `json:"withoutConditionalCache,omitempty"`
+
+	// WithoutClientHints disables ALL UA client hints for the session: the
+	// always-on sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform trio AND the
+	// high-entropy hints. Only headers the caller sets explicitly are sent.
+	// Toggle at runtime with Session.SetClientHintsEnabled(bool).
+	WithoutClientHints bool `json:"withoutClientHints,omitempty"`
+
+	// WithoutHighEntropyClientHints keeps the always-on sec-ch-ua trio but
+	// suppresses the high-entropy hints (sec-ch-ua-full-version-list, -arch,
+	// -platform-version, -bitness, -model, -wow64) that Chrome only sends after
+	// a host advertises Accept-CH. Toggle at runtime with
+	// Session.SetHighEntropyClientHintsEnabled(bool).
+	WithoutHighEntropyClientHints bool `json:"withoutHighEntropyClientHints,omitempty"`
 
 	// Default authentication (can be overridden per-request)
 	Auth *AuthConfig `json:"auth,omitempty"`

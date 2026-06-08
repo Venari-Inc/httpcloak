@@ -165,8 +165,11 @@ func TestH2StreamPriorityModeCustom(t *testing.T) {
 
 func TestH2DisableCookieSplitDefault(t *testing.T) {
 	p := Chrome146()
-	if !p.H2DisableCookieSplit() {
-		t.Fatal("expected true (Chrome default)")
+	// Chrome crumbles the Cookie header into one field per cookie-pair on the
+	// wire (Chromium HpackEncoder::CookieToCrumbs), so the Chrome preset turns
+	// OFF single-field mode: H2DisableCookieSplit() must be false.
+	if p.H2DisableCookieSplit() {
+		t.Fatal("expected false: Chrome crumbles cookies")
 	}
 }
 
@@ -582,8 +585,8 @@ func TestAndroidChromeH2Config(t *testing.T) {
 	if !reflect.DeepEqual(pseudo, expectedPseudo) {
 		t.Fatalf("Android Chrome pseudo order: expected %v, got %v", expectedPseudo, pseudo)
 	}
-	if !p.H2DisableCookieSplit() {
-		t.Fatal("Android Chrome should disable cookie split (same as desktop)")
+	if p.H2DisableCookieSplit() {
+		t.Fatal("Android Chrome should crumble cookies (same as desktop Chrome)")
 	}
 }
 
@@ -603,8 +606,8 @@ func TestChromeH2ConfigNoRegression(t *testing.T) {
 	if p.H2StreamPriorityMode() != "chrome" {
 		t.Fatalf("Chrome priority mode regression: got %q", p.H2StreamPriorityMode())
 	}
-	if !p.H2DisableCookieSplit() {
-		t.Fatal("Chrome cookie split regression: expected true")
+	if p.H2DisableCookieSplit() {
+		t.Fatal("Chrome cookie split regression: expected false (Chrome crumbles cookies)")
 	}
 	settings := p.H2SettingsOrder()
 	if !reflect.DeepEqual(settings, []uint16{1, 2, 4, 6}) {

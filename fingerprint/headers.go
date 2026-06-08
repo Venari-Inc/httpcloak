@@ -227,9 +227,15 @@ type ClientHints struct {
 	UAFullVersionList string // Sec-Ch-Ua-Full-Version-List
 	UAModel          string // Sec-Ch-Ua-Model
 	UAPlatformVersion string // Sec-Ch-Ua-Platform-Version
+	UAWow64          string // Sec-Ch-Ua-Wow64
 }
 
-// GenerateClientHints generates client hint headers for Chrome
+// GenerateClientHints generates client hint headers for Chrome.
+//
+// Deprecated: this builds the hints from a bare version + platform and so cannot
+// keep the GREASE brand token / order in sync with a preset's sec-ch-ua. It is no
+// longer used in production. Use Preset.ResolveClientHints, which derives coherent
+// hints from the preset itself.
 func GenerateClientHints(chromeVersion string, platform PlatformInfo, includeHighEntropy bool) ClientHints {
 	hints := ClientHints{
 		// Low-entropy hints (always sent)
@@ -246,6 +252,166 @@ func GenerateClientHints(chromeVersion string, platform PlatformInfo, includeHig
 	}
 
 	return hints
+}
+
+// ResolveClientHints returns the fully-resolved UA client hints for this preset.
+// The low-entropy trio is taken verbatim from the preset headers; the high-entropy
+// hints come from the preset's ClientHints overrides where set, and are otherwise
+// DERIVED from the trio so they can never drift out of sync. Specifically, an
+// unset full-version-list is built from sec-ch-ua by preserving the exact brand
+// names, order and GREASE token and expanding each major version to "<major>.0.0.0".
+// This is the single coherent source the session layer reads to emit high-entropy
+// hints after a host advertises Accept-CH.
+func (p *Preset) ResolveClientHints() ClientHints {
+	secChUa := p.Headers["sec-ch-ua"]
+	platformName := unquote(p.Headers["sec-ch-ua-platform"]) // e.g. "Windows", "macOS", "Linux", "Android"
+	isMobile := p.Headers["sec-ch-ua-mobile"] == "?1"
+
+	ch := ClientHints{
+		UA:         secChUa,
+		UAMobile:   firstNonEmpty(p.Headers["sec-ch-ua-mobile"], "?0"),
+		UAPlatform: p.Headers["sec-ch-ua-platform"],
+	}
+
+	if p.ClientHints.FullVersionList != "" {
+		ch.UAFullVersionList = p.ClientHints.FullVersionList
+	} else {
+		ch.UAFullVersionList = expandSecChUaVersions(secChUa)
+	}
+
+	ch.UAArch = firstNonEmpty(p.ClientHints.Arch, defaultClientHintArch(platformName, isMobile))
+	ch.UABitness = firstNonEmpty(p.ClientHints.Bitness, defaultClientHintBitness(isMobile))
+	// Desktop Chrome answers sec-ch-ua-model with an empty quoted string; mobile
+	// presets carry a device model via ClientHints.Model.
+	ch.UAModel = firstNonEmpty(p.ClientHints.Model, `""`)
+	ch.UAWow64 = firstNonEmpty(p.ClientHints.Wow64, `?0`)
+	// PlatformVersion: explicit override wins; otherwise the platform default,
+	// which is "" for Linux (real Chrome sends an empty platform version there).
+	if p.ClientHints.PlatformVersion != "" {
+		ch.UAPlatformVersion = p.ClientHints.PlatformVersion
+	} else {
+		ch.UAPlatformVersion = defaultClientHintPlatformVersion(platformName)
+	}
+
+	return ch
+}
+
+// expandSecChUaVersions turns a low-entropy sec-ch-ua value into a coherent
+// sec-ch-ua-full-version-list by expanding each brand's major version to a
+// 4-part version. Brand names, ordering and the GREASE token are preserved
+// exactly, so the derived list always matches the trio. For example:
+//   "Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"
+// becomes
+//   "Google Chrome";v="149.0.0.0", "Chromium";v="149.0.0.0", "Not)A;Brand";v="24.0.0.0"
+// A real capture (set as ClientHints.FullVersionList) carries the exact build
+// number; this derivation is the coherent fallback when none is provided.
+func expandSecChUaVersions(secChUa string) string {
+	if secChUa == "" {
+		return ""
+	}
+	parts := splitBrandList(secChUa)
+	for i, part := range parts {
+		parts[i] = expandBrandVersion(part)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// splitBrandList splits a brand list on the comma+space separators that sit
+// BETWEEN brand entries, without breaking inside a quoted brand name (GREASE
+// tokens such as "Not)A;Brand" never contain a comma, but stay defensive).
+func splitBrandList(s string) []string {
+	var parts []string
+	depth := 0 // inside double quotes when odd
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			depth ^= 1
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, strings.TrimSpace(s[start:]))
+	return parts
+}
+
+// expandBrandVersion expands the v="N" inside a single brand entry to
+// v="N.0.0.0", leaving an already-multipart version untouched.
+func expandBrandVersion(entry string) string {
+	const marker = `;v="`
+	idx := strings.Index(entry, marker)
+	if idx == -1 {
+		return entry
+	}
+	vStart := idx + len(marker)
+	vEnd := strings.IndexByte(entry[vStart:], '"')
+	if vEnd == -1 {
+		return entry
+	}
+	vEnd += vStart
+	ver := entry[vStart:vEnd]
+	if ver == "" || strings.Contains(ver, ".") {
+		return entry // already a full version (or empty) — leave as-is
+	}
+	return entry[:vStart] + ver + ".0.0.0" + entry[vEnd:]
+}
+
+// defaultClientHintArch returns the sec-ch-ua-arch default for a platform.
+// Chrome on mobile sends an empty arch; desktop sends "x86" except Apple
+// Silicon macs which report "arm".
+func defaultClientHintArch(platformName string, isMobile bool) string {
+	if isMobile {
+		return `""`
+	}
+	if platformName == "macOS" {
+		return `"arm"`
+	}
+	return `"x86"`
+}
+
+// defaultClientHintBitness returns the sec-ch-ua-bitness default. Mobile reports
+// an empty bitness; desktop reports "64".
+func defaultClientHintBitness(isMobile bool) string {
+	if isMobile {
+		return `""`
+	}
+	return `"64"`
+}
+
+// defaultClientHintPlatformVersion returns the sec-ch-ua-platform-version default
+// for a platform. Linux is "" (real Chrome behavior). Windows/macOS values are
+// best-effort defaults; a preset should pin the exact value via ClientHints from a
+// real capture.
+func defaultClientHintPlatformVersion(platformName string) string {
+	switch platformName {
+	case "Windows":
+		return `"15.0.0"`
+	case "macOS":
+		return `"14.5.0"`
+	case "Android":
+		return `"14.0.0"`
+	default: // Linux and others
+		return `""`
+	}
+}
+
+// unquote strips a single pair of surrounding double quotes if present.
+func unquote(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// firstNonEmpty returns a if non-empty, else b.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // HeaderCoherence provides methods for generating coherent request headers

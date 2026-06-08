@@ -35,9 +35,14 @@ from .client import (
     PresetPool,
     Response,
     FastResponse,
+    StreamResponse,
+    Cookie,
+    RedirectInfo,
     HTTPCloakError,
     Preset,
     SessionCacheBackend,
+    # Type aliases (for static type hints in user code)
+    FileValue,
     # Custom preset loading
     load_preset,
     load_preset_from_json,
@@ -70,9 +75,13 @@ __all__ = [
     "PresetPool",
     "Response",
     "FastResponse",
+    "StreamResponse",
+    "Cookie",
+    "RedirectInfo",
     "HTTPCloakError",
     "Preset",
     "SessionCacheBackend",
+    "FileValue",
     "load_preset",
     "load_preset_from_json",
     "unregister_preset",
@@ -93,4 +102,4 @@ __all__ = [
     "set_ech_dns_servers",
     "get_ech_dns_servers",
 ]
-__version__ = "1.6.6"
+__version__ = "1.6.8b1"

@@ -13,6 +13,10 @@
 <i>Every Byte of your Request Indistinguishable from Chrome.</i>
 </p>
 
+<p align="center">
+📖 <a href="https://httpcloak.dev"><b>Full documentation at httpcloak.dev</b></a>
+</p>
+
 <br>
 
 ---
@@ -1085,6 +1089,22 @@ Custom forks for browser-accurate fingerprinting:
 - [sardanioss/utls](https://github.com/sardanioss/utls) — TLS fingerprinting
 - [sardanioss/quic-go](https://github.com/sardanioss/quic-go) — HTTP/3 fingerprinting
 - [sardanioss/net](https://github.com/sardanioss/net) — HTTP/2 frame fingerprinting
+
+---
+
+## Documentation
+
+Full docs at **[httpcloak.dev](https://httpcloak.dev)**. Some entry points:
+
+- [Getting Started](https://httpcloak.dev/getting-started) — first request, presets, common options.
+- [Fingerprinting](https://httpcloak.dev/fingerprinting) — JA3 / JA4 / Akamai shorthand, JSON preset builder, per-resource priority.
+- [Proxies](https://httpcloak.dev/proxies) — HTTP CONNECT, SOCKS5, SOCKS5 UDP, MASQUE, source-address binding.
+- [Connection Lifecycle](https://httpcloak.dev/connection-lifecycle) — `Refresh`, `Warmup`, `Fork`, save / restore.
+- [Recipes](https://httpcloak.dev/recipes) — multi-proxy rotation, custom Chrome from tls.peet, long-running scrapers, Wireshark debugging, Local Proxy server.
+- [Reference](https://httpcloak.dev/reference) — every option, every preset, the JSON spec, architecture map.
+- [Bindings](https://httpcloak.dev/bindings) — Go / Python / Node.js / .NET specifics.
+
+LLM-friendly indexes for AI agents: [llms.txt](https://httpcloak.dev/llms.txt) and [llms-full.txt](https://httpcloak.dev/llms-full.txt).
 
 ---
 

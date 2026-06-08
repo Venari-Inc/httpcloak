@@ -32,8 +32,22 @@ type PresetSpec struct {
 	HTTP2    *HTTP2Spec    `json:"http2,omitempty"`
 	HTTP3    *HTTP3Spec    `json:"http3,omitempty"`
 	Headers  *HeaderSpec   `json:"headers,omitempty"`
+	ClientHints *ClientHintsSpec `json:"client_hints,omitempty"`
 	TCP      *TCPSpec      `json:"tcp,omitempty"`
 	Protocol *ProtocolSpec `json:"protocols,omitempty"`
+}
+
+// ClientHintsSpec defines high-entropy UA client hint overrides for a preset.
+// Every field is optional; an omitted field is derived from the sec-ch-ua trio
+// (see Preset.ResolveClientHints) so a preset only needs to spell out what
+// differs from the coherent default. Inherited via based_on like other blocks.
+type ClientHintsSpec struct {
+	FullVersionList string `json:"full_version_list,omitempty"` // sec-ch-ua-full-version-list (exact build from a real capture)
+	PlatformVersion string `json:"platform_version,omitempty"`  // sec-ch-ua-platform-version override
+	Arch            string `json:"arch,omitempty"`              // sec-ch-ua-arch
+	Bitness         string `json:"bitness,omitempty"`           // sec-ch-ua-bitness
+	Model           string `json:"model,omitempty"`             // sec-ch-ua-model
+	Wow64           string `json:"wow64,omitempty"`             // sec-ch-ua-wow64
 }
 
 // TLSSpec defines TLS fingerprint configuration.
@@ -297,6 +311,9 @@ func BuildPreset(spec *PresetSpec) (*Preset, error) {
 	}
 	if spec.Headers != nil {
 		applyHeaders(p, spec.Headers)
+	}
+	if spec.ClientHints != nil {
+		applyClientHintsSpec(p, spec.ClientHints)
 	}
 	if spec.TCP != nil {
 		if err := applyTCP(p, spec.TCP); err != nil {
@@ -910,6 +927,31 @@ func applyHeaders(p *Preset, spec *HeaderSpec) {
 		for i, hp := range spec.Order {
 			p.HeaderOrder[i] = HeaderPair{Key: hp.Key, Value: hp.Value}
 		}
+	}
+}
+
+// applyClientHintsSpec overlays the spec's high-entropy client hint values onto
+// the preset, leaving unset fields to be derived at resolve time. Called after
+// the base preset has been cloned (based_on inheritance), so a child overrides
+// only the fields it specifies.
+func applyClientHintsSpec(p *Preset, spec *ClientHintsSpec) {
+	if spec.FullVersionList != "" {
+		p.ClientHints.FullVersionList = spec.FullVersionList
+	}
+	if spec.PlatformVersion != "" {
+		p.ClientHints.PlatformVersion = spec.PlatformVersion
+	}
+	if spec.Arch != "" {
+		p.ClientHints.Arch = spec.Arch
+	}
+	if spec.Bitness != "" {
+		p.ClientHints.Bitness = spec.Bitness
+	}
+	if spec.Model != "" {
+		p.ClientHints.Model = spec.Model
+	}
+	if spec.Wow64 != "" {
+		p.ClientHints.Wow64 = spec.Wow64
 	}
 }
 

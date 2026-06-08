@@ -213,9 +213,9 @@ export interface SessionOptions {
   allowRedirects?: boolean;
   /** Maximum number of redirects to follow (default: 10) */
   maxRedirects?: number;
-  /** Number of retries on failure (default: 3, set to 0 to disable) */
+  /** Number of retries on failure (default: 0, opt in by setting a positive integer) */
   retry?: number;
-  /** Status codes to retry on (default: [429, 500, 502, 503, 504]) */
+  /** Status codes to retry on (default: empty; set explicitly to opt in, e.g. [429, 500, 502, 503, 504]) */
   retryOnStatus?: number[];
   /** Minimum wait time between retries in milliseconds (default: 500) */
   retryWaitMin?: number;
@@ -243,12 +243,32 @@ export interface SessionOptions {
   switchProtocol?: string;
   /** Disable internal cookie jar entirely — caller manages cookies via per-request headers (default: false) */
   withoutCookieJar?: boolean;
+  /** Disable ETag / If-Modified-Since handling for the lifetime of the session (default: false) */
+  withoutConditionalCache?: boolean;
+  /** Full strip: drop ALL sec-ch-ua client hints (including the always-on trio) for the lifetime of the session (default: false) */
+  withoutClientHints?: boolean;
+  /** High-entropy strip: keep the always-on trio but drop only the Accept-CH high-entropy hints for the lifetime of the session (default: false) */
+  withoutHighEntropyClientHints?: boolean;
+  /** Skip the ECH (Encrypted Client Hello) HTTPS RR lookup. Saves ~15-20ms on first connect (default: false) */
+  disableEch?: boolean;
+  /** Disable HTTP/3 racing while keeping H1/H2 auto-negotiation. Reachable indirectly via httpVersion: "h2" but the explicit flag is cleaner (default: false) */
+  disableHttp3?: boolean;
   /** Custom JA3 fingerprint string (e.g., "771,4865-4866-4867-...,0-23-65281-...,29-23-24,0") */
   ja3?: string;
   /** Custom Akamai HTTP/2 fingerprint string (e.g., "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p") */
   akamai?: string;
   /** Extra fingerprint options: { tls_alpn, tls_signature_algorithms, tls_cert_compression, tls_permute_extensions } */
   extraFp?: Record<string, any>;
+  /** TCP IP Time-To-Live in the SYN packet. 128 = Windows, 64 = Linux/macOS/iOS/Android. */
+  tcpTtl?: number;
+  /** TCP Maximum Segment Size option. 1460 for standard Ethernet. */
+  tcpMss?: number;
+  /** TCP Window Size in the SYN packet. 64240 = Windows 10/11, 65535 = Linux/macOS. */
+  tcpWindowSize?: number;
+  /** TCP Window Scale option exponent. 8 = Windows, 7 = Linux/Android, 6 = macOS/iOS. */
+  tcpWindowScale?: number;
+  /** IP Don't-Fragment flag. true on every modern client. */
+  tcpDf?: boolean;
 }
 
 export interface RequestOptions {
@@ -283,6 +303,80 @@ export interface RequestOptions {
    * Set this explicitly when the auto-sniff gets it wrong (e.g., POST to a CORS endpoint without a JSON Accept header).
    */
   fetchMode?: "cors" | "no-cors" | "navigate" | "websocket";
+
+  /**
+   * Per-request override for redirect following. true forces redirects on this
+   * call, false surfaces the 3xx back to the caller; null / undefined defers
+   * to the session-level setting (which itself defaults to follow).
+   */
+  allowRedirects?: boolean | null;
+
+  /**
+   * Per-request opt-out of the session's ETag / If-Modified-Since handling.
+   * When true, no cache validators are injected on the way out and the
+   * response's ETag / Last-Modified are not stored. Useful for a one-off
+   * fresh fetch without touching the session-wide setting.
+   */
+  disableConditionalCache?: boolean;
+
+  /**
+   * Per-request full strip of sec-ch-ua client hints. When true, ALL client
+   * hints are dropped for this request, including the always-on trio
+   * (sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform). One-off only; the
+   * session-wide setting is untouched.
+   */
+  disableClientHints?: boolean;
+
+  /**
+   * Per-request high-entropy strip. When true, this request keeps the
+   * always-on trio but drops only the high-entropy Accept-CH hints
+   * (e.g. sec-ch-ua-platform-version, -arch, -model, -bitness,
+   * -full-version-list). One-off only; the session-wide setting is untouched.
+   */
+  disableHighEntropyClientHints?: boolean;
+
+  /**
+   * AbortSignal for cancelling an in-flight request. Honored by the async
+   * methods (get, post, put, patch, delete, head, options, request). When
+   * the signal aborts, the underlying Go-side request is cancelled (DNS /
+   * TCP / TLS / HTTP work is torn down) and the returned promise rejects
+   * with the signal's reason (or a generic AbortError if none was set).
+   *
+   * @example
+   * const controller = new AbortController();
+   * setTimeout(() => controller.abort(new Error("too slow")), 5000);
+   * await session.get("https://slow.example.com", { signal: controller.signal });
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * Snapshot returned by `Session.stats()`. Mirrors the wire shape emitted by
+ * the Go-side `session.Stats()` after snake_case marshalling.
+ */
+export interface SessionStats {
+  /** Stable session ID assigned at construction. */
+  id: string;
+  /** Preset name the session was created with. */
+  preset: string;
+  /** Construction time, Unix nanoseconds. */
+  created_at: number;
+  /** Last-request time, Unix nanoseconds. */
+  last_used: number;
+  /** Total requests serviced by this session. */
+  request_count: number;
+  /** Whether the session is still usable (false after close). */
+  active: boolean;
+  /** Live cookie count in the jar. */
+  cookie_count: number;
+  /** Conditional-cache entry count (one per cached URL). */
+  cache_entry_count: number;
+  /** Age in nanoseconds (now - created_at). */
+  age_ns: number;
+  /** Idle time in nanoseconds (now - last_used). */
+  idle_time_ns: number;
+  /** Transport-level stats (per-protocol). Shape varies; treat as opaque. */
+  transport_stats?: Record<string, any>;
 }
 
 export class Session {
@@ -313,8 +407,11 @@ export class Session {
   /** Refresh the session by closing all connections while keeping TLS session tickets.
    * This simulates a browser page refresh - connections are severed but 0-RTT
    * early data can be used on reconnection due to preserved session tickets.
+   *
+   * @param switchProtocol - Optional protocol to switch to ("h1", "h2", "h3").
+   *   Overrides any switchProtocol set at construction time. Persists for future refresh() calls.
    */
-  refresh(): void;
+  refresh(switchProtocol?: "h1" | "h2" | "h3"): void;
 
   // Synchronous methods
   /** Perform a synchronous GET request */
@@ -359,17 +456,11 @@ export class Session {
   /** Get a specific cookie by name with full metadata */
   getCookieDetailed(name: string): Cookie | null;
 
-  /**
-   * Get all cookies as a flat name-value object.
-   * @deprecated Will return Cookie[] with full metadata in a future release. Use getCookiesDetailed() for the new format now.
-   */
-  getCookies(): Record<string, string>;
+  /** Get all cookies with full metadata. Alias of getCookiesDetailed(); the older flat dict shape was removed in v1.6.5. */
+  getCookies(): Cookie[];
 
-  /**
-   * Get a specific cookie value by name.
-   * @deprecated Will return Cookie|null in a future release. Use getCookieDetailed() for the new format now.
-   */
-  getCookie(name: string): string | null;
+  /** Get a specific cookie by name. Alias of getCookieDetailed(); the older value-only shape was removed in v1.6.5. */
+  getCookie(name: string): Cookie | null;
 
   /** Set a cookie in the session */
   setCookie(
@@ -392,11 +483,94 @@ export class Session {
   /** Clear all cookies from the session */
   clearCookies(): void;
 
+  /** Cookies in the session jar with full metadata. Same shape as getCookies(). */
+  readonly cookies: Cookie[];
+
+  // Conditional cache and redirect runtime control
+
   /**
-   * Get cookies as a property.
-   * @deprecated Will return Cookie[] with full metadata in a future release.
+   * Drop the session's per-URL conditional-cache map (ETag / Last-Modified).
+   * The next request to each URL goes out without If-None-Match /
+   * If-Modified-Since headers. Cookies and TLS tickets are not touched.
    */
-  readonly cookies: Record<string, string>;
+  clearCache(): void;
+
+  /**
+   * Snapshot of session counters, timestamps and transport-level metrics.
+   * Mirrors the keys Go's session.Stats() returns, snake_case on the wire.
+   */
+  stats(): SessionStats;
+
+  /**
+   * Return the time since the session last serviced a request, in seconds.
+   * Returns -1 if the session handle is invalid.
+   */
+  idleTime(): number;
+
+  /**
+   * Return true if the session is still usable (close() has not been called
+   * and the handle is valid).
+   */
+  isActive(): boolean;
+
+  /**
+   * Reset the idle timer to now without issuing a request. Useful in
+   * long-running pools where an external heartbeat shouldn't let a session
+   * look idle to a reaper.
+   */
+  touch(): void;
+
+  /**
+   * Toggle the session's ETag / If-Modified-Since handling at runtime.
+   * When disabled, the session stops injecting cache validators on outgoing
+   * requests and stops storing them from responses; the existing cache map
+   * is preserved (re-enabling resumes using it). Pair with clearCache() to
+   * also wipe previously-stored validators.
+   */
+  setConditionalCache(enabled: boolean): void;
+
+  /** Read the session's current conditional-cache state. */
+  getConditionalCache(): boolean;
+
+  /**
+   * Toggle the session's client-hints handling at runtime (full strip).
+   * When disabled, the session drops ALL sec-ch-ua client hints, including
+   * the always-on trio (sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform).
+   * The change takes effect on the next request and persists until set again.
+   */
+  setClientHints(enabled: boolean): void;
+
+  /** Read the session's current client-hints state. */
+  getClientHints(): boolean;
+
+  /**
+   * Toggle the session's high-entropy client-hints handling at runtime.
+   * When disabled, the session keeps the always-on trio but drops only the
+   * high-entropy Accept-CH hints (e.g. sec-ch-ua-platform-version, -arch,
+   * -model, -bitness, -full-version-list). Takes effect on the next request.
+   */
+  setHighEntropyClientHints(enabled: boolean): void;
+
+  /** Read the session's current high-entropy client-hints state. */
+  getHighEntropyClientHints(): boolean;
+
+  /**
+   * Toggle the session's redirect-following policy at runtime. The change
+   * takes effect on the next request and persists until set again.
+   */
+  setFollowRedirects(enabled: boolean): void;
+
+  /** Read the session's current redirect-following policy. */
+  getFollowRedirects(): boolean;
+
+  /**
+   * Update the session's redirect cap at runtime. Values of zero or below
+   * are ignored, leaving the prior cap (or the default of 10) in place.
+   */
+  setMaxRedirects(max: number): void;
+
+  /** Read the session's current redirect cap. */
+  getMaxRedirects(): number;
 
   // Proxy management
 
@@ -657,6 +831,37 @@ export class Session {
    * @returns FastResponse with Buffer body
    */
   patchFast(url: string, options?: RequestOptions): FastResponse;
+
+  /**
+   * Stream an arbitrary-sized body to the wire without buffering it in memory.
+   * `chunks` is any iterable / async-iterable yielding Buffer / Uint8Array /
+   * string chunks; the Go side opens an io.Pipe for the body and each chunk
+   * flows straight through with no base64 wrap and no JSON envelope.
+   *
+   * @param method  Typically "POST", "PUT" or "PATCH".
+   * @param url
+   * @param chunks  Iterable or async-iterable of body chunks.
+   * @param options.headers Headers (Content-Type defaults to application/octet-stream).
+   * @param options.contentType Optional explicit Content-Type override.
+   * @param options.timeout Per-request timeout in milliseconds.
+   * @returns Resolves to a regular `Response` once the upload completes.
+   */
+  uploadStream(
+    method: string,
+    url: string,
+    chunks: AsyncIterable<Buffer | Uint8Array | string> | Iterable<Buffer | Uint8Array | string>,
+    options?: { headers?: Record<string, string>; contentType?: string; timeout?: number }
+  ): Promise<Response>;
+
+  /**
+   * Convenience wrapper: streaming POST. Same semantics as
+   * `uploadStream("POST", url, chunks, options)`.
+   */
+  postUpload(
+    url: string,
+    chunks: AsyncIterable<Buffer | Uint8Array | string> | Iterable<Buffer | Uint8Array | string>,
+    options?: { headers?: Record<string, string>; contentType?: string; timeout?: number }
+  ): Promise<Response>;
 }
 
 export interface LocalProxyOptions {
@@ -677,16 +882,20 @@ export interface LocalProxyOptions {
 }
 
 export interface LocalProxyStats {
-  /** Total number of requests processed */
-  totalRequests: number;
-  /** Number of active connections */
-  activeConnections: number;
-  /** Number of failed requests */
-  failedRequests: number;
-  /** Bytes sent */
-  bytesSent: number;
-  /** Bytes received */
-  bytesReceived: number;
+  /** Whether the proxy is currently accepting connections */
+  running: boolean;
+  /** TCP port the proxy is bound to */
+  port: number;
+  /** Live count of in-flight connections */
+  active_conns: number;
+  /** Lifetime request counter since the proxy started */
+  total_requests: number;
+  /** Preset name the proxy was started with */
+  preset: string;
+  /** Max concurrent connections configured at start time */
+  max_connections: number;
+  /** Number of sessions currently registered via registerSession() */
+  registered_sessions: number;
 }
 
 /**
@@ -791,6 +1000,22 @@ export class LocalProxy {
   unregisterSession(sessionId: string): boolean;
 
   /**
+   * Return the IDs of every session currently registered on this proxy.
+   * These are the same IDs the X-HTTPCloak-Session header accepts for
+   * per-request session routing.
+   *
+   * @returns List of registered session IDs (empty array if none).
+   */
+  listSessions(): string[];
+
+  /**
+   * Return true if a session with the given ID is currently registered.
+   * Cheaper than `listSessions().includes(id)` when callers only need an
+   * existence check (no JSON marshal across the FFI boundary).
+   */
+  hasSession(sessionId: string): boolean;
+
+  /**
    * Stop and close the proxy.
    * After closing, the LocalProxy instance cannot be reused.
    */
@@ -800,8 +1025,30 @@ export class LocalProxy {
 /** Get the httpcloak library version */
 export function version(): string;
 
-/** Get list of available browser presets */
-export function availablePresets(): string[];
+/**
+ * Get available browser presets keyed by preset name.
+ *
+ * Each entry carries the protocols the preset supports (some H1/H2 only, some H1/H2/H3).
+ * The shape is `{ [presetName: string]: { protocols: string[] } }`.
+ *
+ * @example
+ * const presets = availablePresets();
+ * Object.entries(presets).filter(([, info]) => info.protocols.includes("h3"));
+ */
+export function availablePresets(): Record<string, { protocols: string[] }>;
+
+/**
+ * Return a fully-resolved JSON dump of a preset's TLS / H2 / H3 / header configuration.
+ *
+ * Useful for inspecting what a preset name actually does at the wire level, or for
+ * dumping a built-in preset, mutating it, and loading it back with `loadPresetFromJSON`
+ * under a new name.
+ *
+ * @param name - Preset name (e.g. "chrome-148-windows", "firefox-148", "chrome-latest")
+ * @returns JSON string. Parse with `JSON.parse` to get the structured form.
+ * @throws {HTTPCloakError} If the preset name is not registered.
+ */
+export function describePreset(name: string): string;
 
 /**
  * Configure the DNS servers used for ECH (Encrypted Client Hello) config queries.
@@ -859,6 +1106,28 @@ export function request(method: string, url: string, options?: RequestOptions): 
 
 /** Available browser presets */
 export const Preset: {
+  CHROME_LATEST: string;
+  CHROME_LATEST_WINDOWS: string;
+  CHROME_LATEST_LINUX: string;
+  CHROME_LATEST_MACOS: string;
+  CHROME_LATEST_IOS: string;
+  CHROME_LATEST_ANDROID: string;
+  CHROME_149: string;
+  CHROME_149_WINDOWS: string;
+  CHROME_149_LINUX: string;
+  CHROME_149_MACOS: string;
+  CHROME_148: string;
+  CHROME_148_WINDOWS: string;
+  CHROME_148_LINUX: string;
+  CHROME_148_MACOS: string;
+  CHROME_148_IOS: string;
+  CHROME_148_ANDROID: string;
+  CHROME_147: string;
+  CHROME_147_WINDOWS: string;
+  CHROME_147_LINUX: string;
+  CHROME_147_MACOS: string;
+  CHROME_147_IOS: string;
+  CHROME_147_ANDROID: string;
   CHROME_146: string;
   CHROME_146_WINDOWS: string;
   CHROME_146_LINUX: string;

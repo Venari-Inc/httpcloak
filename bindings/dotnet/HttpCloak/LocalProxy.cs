@@ -215,6 +215,42 @@ public sealed class LocalProxy : IDisposable
         return result == 1;
     }
 
+    /// <summary>
+    /// Return the IDs of every session currently registered on this proxy.
+    /// These are the same IDs the X-HTTPCloak-Session header accepts for
+    /// per-request session routing.
+    /// </summary>
+    public List<string> ListSessions()
+    {
+        ThrowIfDisposed();
+
+        IntPtr resultPtr = Native.LocalProxyListSessions(_handle);
+        string? json = Native.PtrToStringAndFree(resultPtr);
+        if (string.IsNullOrEmpty(json)) return new List<string>();
+
+        try
+        {
+            return JsonSerializer.Deserialize(json, LocalProxyJsonContext.Default.ListString)
+                ?? new List<string>();
+        }
+        catch
+        {
+            return new List<string>();
+        }
+    }
+
+    /// <summary>
+    /// Return true if a session with the given ID is currently registered.
+    /// Cheaper than calling <see cref="ListSessions"/> and scanning when
+    /// callers only need an existence check.
+    /// </summary>
+    public bool HasSession(string sessionId)
+    {
+        ThrowIfDisposed();
+        if (string.IsNullOrEmpty(sessionId)) return false;
+        return Native.LocalProxyHasSession(_handle, sessionId) == 1;
+    }
+
     private void ThrowIfDisposed()
     {
         if (_disposed)
@@ -300,6 +336,7 @@ public class LocalProxyStats
 /// </summary>
 [JsonSerializable(typeof(LocalProxyConfig))]
 [JsonSerializable(typeof(LocalProxyStats))]
+[JsonSerializable(typeof(List<string>))]
 internal partial class LocalProxyJsonContext : JsonSerializerContext
 {
 }

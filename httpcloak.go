@@ -175,6 +175,29 @@ type Request struct {
 	// This is useful for LocalProxy where each request can have different TLS-only settings
 	// via the X-HTTPCloak-TlsOnly header.
 	TLSOnly *bool
+
+	// FollowRedirects, when non-nil, overrides the session's follow-redirects
+	// policy for this single request. Set to &true to follow redirects on this
+	// request, &false to surface the 3xx response back to the caller. When nil,
+	// the session-level setting is used.
+	FollowRedirects *bool
+
+	// DisableConditionalCache, when true, skips ETag / If-Modified-Since handling
+	// for this single request: no cache validators are injected on the way out
+	// and any ETag / Last-Modified on the response is not stored in the session
+	// cache. Useful for forcing a fresh fetch without touching the session-wide
+	// setting.
+	DisableConditionalCache bool
+
+	// DisableClientHints, when true, strips ALL UA client hints for this request:
+	// the always-on sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform trio and the
+	// high-entropy hints. Headers you set explicitly still pass through.
+	DisableClientHints bool
+
+	// DisableHighEntropyClientHints, when true, keeps the always-on sec-ch-ua trio
+	// but suppresses the high-entropy hints (full-version-list, arch,
+	// platform-version, bitness, model, wow64) for this single request.
+	DisableHighEntropyClientHints bool
 }
 
 // RedirectInfo contains information about a redirect response
@@ -378,6 +401,9 @@ type sessionConfig struct {
 	enableSpeculativeTLS bool   // Enable speculative TLS optimization for proxy connections
 	switchProtocol        string // Protocol to switch to after Refresh() (e.g. "h1", "h2", "h3")
 	withoutCookieJar      bool   // Disable internal cookie jar entirely (caller manages cookies via headers)
+	withoutConditionalCache bool // Disable ETag / If-Modified-Since handling entirely
+	withoutClientHints    bool   // Disable all UA client hints (trio + high-entropy)
+	withoutHighEntropyClientHints bool // Disable only the high-entropy UA client hints
 
 	// Distributed session cache
 	sessionCacheBackend       transport.SessionCacheBackend
@@ -587,6 +613,44 @@ func WithoutCookieJar() SessionOption {
 	}
 }
 
+// WithoutConditionalCache disables the session's ETag / If-Modified-Since
+// handling for the lifetime of the session. When set, the session never
+// injects If-None-Match or If-Modified-Since headers and never stores those
+// validators from responses.
+//
+// Useful for benchmarking, fingerprint testing, or any workflow that needs
+// every request to hit the origin fresh regardless of prior responses.
+// Toggle the same state at runtime with Session.SetConditionalCacheEnabled,
+// or skip the cache for a single request via Request.DisableConditionalCache.
+func WithoutConditionalCache() SessionOption {
+	return func(c *sessionConfig) {
+		c.withoutConditionalCache = true
+	}
+}
+
+// WithoutClientHints disables ALL UA client hints for the session: the always-on
+// sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform trio AND the high-entropy
+// hints. Only sec-ch-* headers you set explicitly are sent. Toggle at runtime
+// with Session.SetClientHintsEnabled, or for a single request via
+// Request.DisableClientHints. Note that real Chrome always sends the trio over
+// HTTPS, so this trades fidelity for control.
+func WithoutClientHints() SessionOption {
+	return func(c *sessionConfig) {
+		c.withoutClientHints = true
+	}
+}
+
+// WithoutHighEntropyClientHints keeps the always-on sec-ch-ua trio but suppresses
+// the high-entropy hints (sec-ch-ua-full-version-list, -arch, -platform-version,
+// -bitness, -model, -wow64) that Chrome only sends after a host advertises
+// Accept-CH. Toggle at runtime with Session.SetHighEntropyClientHintsEnabled, or
+// for a single request via Request.DisableHighEntropyClientHints.
+func WithoutHighEntropyClientHints() SessionOption {
+	return func(c *sessionConfig) {
+		c.withoutHighEntropyClientHints = true
+	}
+}
+
 // WithConnectTo sets a host mapping for domain fronting.
 // Requests to requestHost will connect to connectHost instead.
 // The TLS SNI and Host header will still use requestHost.
@@ -745,8 +809,11 @@ func NewSession(preset string, opts ...SessionOption) *Session {
 		KeyLogFile:         cfg.keyLogFile,
 		DisableECH:            cfg.disableECH,
 		EnableSpeculativeTLS: cfg.enableSpeculativeTLS,
-		SwitchProtocol:        cfg.switchProtocol,
-		WithoutCookieJar:      cfg.withoutCookieJar,
+		SwitchProtocol:          cfg.switchProtocol,
+		WithoutCookieJar:        cfg.withoutCookieJar,
+		WithoutConditionalCache: cfg.withoutConditionalCache,
+		WithoutClientHints:            cfg.withoutClientHints,
+		WithoutHighEntropyClientHints: cfg.withoutHighEntropyClientHints,
 	}
 
 	// Retry configuration
@@ -806,11 +873,16 @@ func (s *Session) Do(ctx context.Context, req *Request) (*Response, error) {
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:     req.Method,
-		URL:        req.URL,
-		Headers:    req.Headers,
-		BodyReader: req.Body,
-		TLSOnly:    req.TLSOnly,
+		Method:                  req.Method,
+		URL:                     req.URL,
+		Headers:                 req.Headers,
+		BodyReader:              req.Body,
+		TLSOnly:                 req.TLSOnly,
+		FollowRedirects:         req.FollowRedirects,
+		DisableConditionalCache: req.DisableConditionalCache,
+		DisableClientHints:            req.DisableClientHints,
+		DisableHighEntropyClientHints: req.DisableHighEntropyClientHints,
+		Timeout:                 req.Timeout,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
@@ -847,11 +919,16 @@ func (s *Session) DoWithBody(ctx context.Context, req *Request, bodyReader io.Re
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:     req.Method,
-		URL:        req.URL,
-		Headers:    req.Headers,
-		BodyReader: bodyReader,
-		TLSOnly:    req.TLSOnly,
+		Method:                  req.Method,
+		URL:                     req.URL,
+		Headers:                 req.Headers,
+		BodyReader:              bodyReader,
+		TLSOnly:                 req.TLSOnly,
+		FollowRedirects:         req.FollowRedirects,
+		DisableConditionalCache: req.DisableConditionalCache,
+		DisableClientHints:            req.DisableClientHints,
+		DisableHighEntropyClientHints: req.DisableHighEntropyClientHints,
+		Timeout:                 req.Timeout,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
@@ -973,6 +1050,102 @@ func (s *Session) SetSessionIdentifier(sessionId string) {
 	s.inner.SetSessionIdentifier(sessionId)
 }
 
+// Stats returns a snapshot of session counters and timestamps.
+func (s *Session) Stats() session.SessionStats {
+	return s.inner.Stats()
+}
+
+// IdleTime returns time since the session last serviced a request.
+func (s *Session) IdleTime() time.Duration {
+	return s.inner.IdleTime()
+}
+
+// IsActive reports whether the session is still usable. False once Close has run.
+func (s *Session) IsActive() bool {
+	return s.inner.IsActive()
+}
+
+// Touch resets the idle timer to now without issuing a request.
+func (s *Session) Touch() {
+	s.inner.Touch()
+}
+
+// ClearCache drops the conditional-request cache (ETag / Last-Modified entries).
+// Cookies and TLS tickets are not affected.
+func (s *Session) ClearCache() {
+	s.inner.ClearCache()
+}
+
+// SetConditionalCacheEnabled toggles the session's ETag / If-Modified-Since
+// handling at runtime. When false, the session stops injecting cache
+// validators on outgoing requests and stops storing them from responses.
+// Pair with ClearCache to also wipe any previously-stored validators.
+func (s *Session) SetConditionalCacheEnabled(enabled bool) {
+	s.inner.SetConditionalCacheEnabled(enabled)
+}
+
+// ConditionalCacheEnabled reports whether the session is currently injecting
+// and storing ETag / If-Modified-Since validators.
+func (s *Session) ConditionalCacheEnabled() bool {
+	return s.inner.ConditionalCacheEnabled()
+}
+
+// SetClientHintsEnabled toggles ALL UA client hints (the sec-ch-ua trio plus the
+// high-entropy hints) at runtime. When false, only sec-ch-* headers the caller
+// sets explicitly are sent.
+func (s *Session) SetClientHintsEnabled(enabled bool) {
+	s.inner.SetClientHintsEnabled(enabled)
+}
+
+// ClientHintsEnabled reports whether UA client hints are currently enabled.
+func (s *Session) ClientHintsEnabled() bool {
+	return s.inner.ClientHintsEnabled()
+}
+
+// SetHighEntropyClientHintsEnabled toggles only the high-entropy UA client hints
+// at runtime; the always-on sec-ch-ua trio is unaffected.
+func (s *Session) SetHighEntropyClientHintsEnabled(enabled bool) {
+	s.inner.SetHighEntropyClientHintsEnabled(enabled)
+}
+
+// HighEntropyClientHintsEnabled reports whether the high-entropy UA client hints
+// are currently enabled.
+func (s *Session) HighEntropyClientHintsEnabled() bool {
+	return s.inner.HighEntropyClientHintsEnabled()
+}
+
+// SetFollowRedirects toggles the session's redirect-following policy at
+// runtime. A per-request Request.FollowRedirects override still wins over
+// this value for that one request.
+func (s *Session) SetFollowRedirects(enabled bool) {
+	s.inner.SetFollowRedirects(enabled)
+}
+
+// SetMaxRedirects updates the session's redirect cap at runtime. Values
+// of zero or below are ignored, leaving the prior cap (or the default
+// of 10) in place.
+func (s *Session) SetMaxRedirects(max int) {
+	s.inner.SetMaxRedirects(max)
+}
+
+// FollowRedirects reports the session's current redirect-following policy.
+// Per-request overrides via Request.FollowRedirects don't change this value.
+func (s *Session) FollowRedirects() bool {
+	return s.inner.FollowRedirects()
+}
+
+// MaxRedirects reports the session's current redirect cap.
+func (s *Session) MaxRedirects() int {
+	return s.inner.MaxRedirects()
+}
+
+// GetTransport returns the underlying transport. Escape hatch for advanced
+// transport-level access; the lib reserves the right to evolve the transport
+// surface between releases.
+func (s *Session) GetTransport() *transport.Transport {
+	return s.inner.GetTransport()
+}
+
 // Warmup simulates a real browser page load to warm TLS sessions, cookies,
 // and cache state. Fetches the HTML page and its subresources (CSS, JS, images)
 // with realistic headers, priorities, and timing.
@@ -1084,11 +1257,16 @@ func (s *Session) DoStream(ctx context.Context, req *Request) (*StreamResponse, 
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:     req.Method,
-		URL:        req.URL,
-		Headers:    req.Headers,
-		BodyReader: req.Body,
-		TLSOnly:    req.TLSOnly,
+		Method:                  req.Method,
+		URL:                     req.URL,
+		Headers:                 req.Headers,
+		BodyReader:              req.Body,
+		TLSOnly:                 req.TLSOnly,
+		FollowRedirects:         req.FollowRedirects,
+		DisableConditionalCache: req.DisableConditionalCache,
+		DisableClientHints:            req.DisableClientHints,
+		DisableHighEntropyClientHints: req.DisableHighEntropyClientHints,
+		Timeout:                 req.Timeout,
 	}
 
 	resp, err := s.inner.RequestStream(ctx, sReq)
@@ -1119,6 +1297,42 @@ func (s *Session) GetStreamWithHeaders(ctx context.Context, url string, headers 
 // Presets returns available fingerprint presets
 func Presets() []string {
 	return fingerprint.Available()
+}
+
+// ValidateSessionFile validates a session file without loading it.
+// Returns nil if the file at path is a valid httpcloak session blob,
+// or a descriptive error otherwise. Useful for pre-flight checks before
+// LoadSession on user-supplied paths.
+func ValidateSessionFile(path string) error {
+	return session.ValidateSessionFile(path)
+}
+
+// SetKeyLogWriter installs a process-global writer that the lib uses to
+// emit TLS keylog lines (NSS keylog format). Pass nil to disable.
+//
+// This is the io.Writer-flavoured sibling of WithSessionKeyLogFile, which
+// takes a file path. Use SetKeyLogWriter when the destination is something
+// other than a file: a ring buffer, an S3 multipart uploader, a syslog
+// pipe, etc. Setting a writer affects every TLS handshake the binary
+// performs from the moment it's set.
+func SetKeyLogWriter(w io.Writer) {
+	transport.SetKeyLogWriter(w)
+}
+
+// Manager is an in-process registry for many sessions at once. It's the
+// right tool for worker pools, multi-tenant scrapers, or any service that
+// needs to look up sessions by external ID with bounded concurrency and
+// idle eviction. Re-exported from the session subpackage so callers don't
+// have to import it directly. See the connection-lifecycle/session-manager
+// chapter for usage.
+type Manager = session.Manager
+
+// NewManager constructs a fresh session Manager with the package defaults
+// (max 100 concurrent sessions, 30-minute idle timeout, 1-minute cleanup
+// interval). Override the bounds with Manager.SetMaxSessions and
+// Manager.SetSessionTimeout.
+func NewManager() *Manager {
+	return session.NewManager()
 }
 
 // parseSignatureAlgorithms converts string names to tls.SignatureScheme values.

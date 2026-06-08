@@ -122,12 +122,10 @@ func (t *Transport) DoStream(ctx context.Context, req *Request) (*StreamResponse
 			effectiveProxyURL = t.proxy.UDPProxy
 		}
 		if SupportsQUIC(effectiveProxyURL) {
-			resp, err := t.doStreamHTTP3(ctx, req)
-			if err == nil {
-				return resp, nil
-			}
-			// Fallback to HTTP/2
-			return t.doStreamHTTP2(ctx, req)
+			// Race H3/H2 rather than trying H3 first: a proxy that cannot relay
+			// QUIC would otherwise stall ~5s on the H3 handshake before falling
+			// back. doStreamAuto probes both (proxy-aware) and dispatches once.
+			return t.doStreamAuto(ctx, req)
 		}
 		// HTTP/HTTPS proxy - use HTTP/2
 		return t.doStreamHTTP2(ctx, req)
@@ -142,15 +140,76 @@ func (t *Transport) DoStream(ctx context.Context, req *Request) (*StreamResponse
 	case ProtocolHTTP3:
 		return t.doStreamHTTP3(ctx, req)
 	default:
-		// Auto mode: try H3 -> H2 with fallback
-		if t.h3Transport != nil {
+		// Auto mode: race H3 and H2 connection probes, dispatch on the winner.
+		return t.doStreamAuto(ctx, req)
+	}
+}
+
+// doStreamAuto selects a protocol for a streaming request without paying the
+// sequential "try H3 first" stall. It reuses any cached per-host protocol
+// decision (shared with the buffered doAuto path); otherwise it races proxy-
+// aware connection probes and dispatches the single stream on the winner.
+// Only the probe is raced, never the request, so the body is sent exactly once
+// (safe for non-idempotent methods).
+func (t *Transport) doStreamAuto(ctx context.Context, req *Request) (*StreamResponse, error) {
+	host := extractHost(req.URL)
+
+	// Reuse a prior decision for this host.
+	t.protocolSupportMu.RLock()
+	known, ok := t.protocolSupport[host]
+	t.protocolSupportMu.RUnlock()
+	if ok {
+		switch known {
+		case ProtocolHTTP3:
 			resp, err := t.doStreamHTTP3(ctx, req)
 			if err == nil {
 				return resp, nil
 			}
+			if req.BodyReader != nil {
+				// A one-shot BodyReader may have been partially drained by the
+				// H3 attempt; re-sending it on H2 would corrupt the body. Surface
+				// the H3 error instead of silently sending a truncated request.
+				return nil, err
+			}
+			return t.doStreamHTTP2(ctx, req)
+		case ProtocolHTTP2, ProtocolHTTP1:
+			return t.doStreamHTTP2(ctx, req)
 		}
-		return t.doStreamHTTP2(ctx, req)
 	}
+
+	// No cached decision yet: race a connection probe when H3 is viable.
+	if t.preset.SupportHTTP3 && t.h3Transport != nil {
+		port := "443"
+		if u, err := url.Parse(req.URL); err == nil && u.Port() != "" {
+			port = u.Port()
+		}
+		decision := t.raceConnectProtocol(ctx, host, port)
+		switch {
+		case decision.err != nil:
+			return nil, decision.err
+		case decision.alpnErr != nil:
+			// Streaming has no H1-conn-reuse path; drop the probe conn and let
+			// the H2 attempt below negotiate on its own.
+			decision.alpnErr.TLSConn.Close()
+		case decision.protocol == ProtocolHTTP3:
+			resp, err := t.doStreamHTTP3(ctx, req)
+			if err == nil {
+				t.cacheProtocol(host, ProtocolHTTP3)
+				return resp, nil
+			}
+			if req.BodyReader != nil {
+				// One-shot body may be drained; do not re-send on H2 (see above).
+				return nil, err
+			}
+			// Replayable body (or none): fall through to H2.
+		}
+	}
+
+	resp, err := t.doStreamHTTP2(ctx, req)
+	if err == nil {
+		t.cacheProtocol(host, ProtocolHTTP2)
+	}
+	return resp, err
 }
 
 // doStreamHTTP1 executes a streaming request over HTTP/1.1
@@ -206,7 +265,7 @@ func (t *Transport) doStreamHTTP1(ctx context.Context, req *Request) (*StreamRes
 	}
 
 	// Set preset headers
-	applyPresetHeaders(httpReq, t.preset, t.getHeaderOrder(), t.getCustomPseudoOrder(), effectiveTLSOnly, "h1", req.Headers)
+	applyPresetHeaders(httpReq, t.preset, t.getHeaderOrder(), t.getCustomPseudoOrder(), effectiveTLSOnly, "h1", req.Headers, req.DisableClientHints)
 
 	// Override with custom headers (multi-value support)
 	// Use Set for first value to replace preset headers, Add for additional values
@@ -305,7 +364,7 @@ func (t *Transport) doStreamHTTP2(ctx context.Context, req *Request) (*StreamRes
 	}
 
 	// Set preset headers
-	applyPresetHeaders(httpReq, t.preset, t.getHeaderOrder(), t.getCustomPseudoOrder(), effectiveTLSOnly, "h2", req.Headers)
+	applyPresetHeaders(httpReq, t.preset, t.getHeaderOrder(), t.getCustomPseudoOrder(), effectiveTLSOnly, "h2", req.Headers, req.DisableClientHints)
 
 	// Override with custom headers (multi-value support)
 	// Use Set for first value to replace preset headers, Add for additional values
@@ -404,7 +463,7 @@ func (t *Transport) doStreamHTTP3(ctx context.Context, req *Request) (*StreamRes
 	}
 
 	// Set preset headers
-	applyPresetHeaders(httpReq, t.preset, t.getHeaderOrder(), t.getCustomPseudoOrder(), effectiveTLSOnly, "h3", req.Headers)
+	applyPresetHeaders(httpReq, t.preset, t.getHeaderOrder(), t.getCustomPseudoOrder(), effectiveTLSOnly, "h3", req.Headers, req.DisableClientHints)
 
 	// Override with custom headers (multi-value support)
 	// Use Set for first value to replace preset headers, Add for additional values

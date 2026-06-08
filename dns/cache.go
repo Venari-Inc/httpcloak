@@ -298,11 +298,26 @@ type ECHEntry struct {
 	ExpiresAt  time.Time
 }
 
+// echStaleGrace bounds how long an expired ECH config may still be served when
+// a fresh DNS re-query fails. Past this, FetchECHConfigs returns no ECH (the
+// handshake proceeds without it) rather than risk a retired-key rejection.
+const echStaleGrace = 5 * time.Minute
+
 // echCache stores ECH configs separately
 var (
 	echCache   = make(map[string]*ECHEntry)
 	echCacheMu sync.RWMutex
 )
+
+// InvalidateECHConfig drops the cached ECH config for a host so the next
+// FetchECHConfigs re-queries DNS for a fresh one. Call this when a handshake is
+// rejected in a way that suggests the cached config went stale (for example the
+// CDN rotated its ECH keys).
+func InvalidateECHConfig(hostname string) {
+	echCacheMu.Lock()
+	delete(echCache, hostname)
+	echCacheMu.Unlock()
+}
 
 // Default DNS servers for ECH queries
 var (
@@ -347,8 +362,11 @@ func FetchECHConfigs(ctx context.Context, hostname string) ([]byte, error) {
 	// Query DNS for HTTPS records
 	echConfigList, ttl, err := queryECHFromDNS(ctx, hostname)
 	if err != nil {
-		// Return cached value if available, even if expired
-		if exists {
+		// On DNS failure serve the expired config only within a short grace
+		// window. Serving an indefinitely-stale config strands us on a retired
+		// key after the CDN rotates ECH, which the server then rejects with
+		// illegal_parameter on every handshake until the process restarts.
+		if exists && time.Now().Before(entry.ExpiresAt.Add(echStaleGrace)) {
 			return entry.ConfigList, nil
 		}
 		return nil, nil // No ECH available is not an error

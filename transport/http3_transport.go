@@ -211,6 +211,13 @@ type HTTP3Transport struct {
 	// PSK variant for inner MASQUE connections
 	cachedClientHelloSpecInnerPSK *utls.ClientHelloSpec
 
+	// Resolved ClientHelloID (QUIC-specific, or TCP fallback). Used to regenerate
+	// a FRESH ClientHelloSpec per dial. utls ApplyPreset mutates the spec in place
+	// (KeyShares.Data, GREASE), so sharing one cached spec across concurrent QUIC
+	// dials is a data race; each dial gets its own spec generated from this ID +
+	// shuffleSeed, which keeps extension order (and thus JA3/JA4) byte-stable.
+	clientHelloID *utls.ClientHelloID
+
 	// Shuffle seed for TLS and transport parameter ordering (consistent per session)
 	shuffleSeed int64
 
@@ -237,9 +244,13 @@ type HTTP3Transport struct {
 	config *TransportConfig
 
 	// ECH config cache - stores ECH configs per host for session resumption
-	// When resuming a session, we must use the same ECH config that was used
-	// to create the original session ticket, not a fresh one from DNS
-	echConfigCache   map[string][]byte
+	// Per-host ECH config cache. Entries carry an expiry so a long-lived
+	// transport refetches periodically instead of pinning one config forever;
+	// pinning forever strands the session on a stale config after the CDN
+	// rotates ECH keys, which the server rejects with illegal_parameter on every
+	// handshake until restart. Also invalidated on a handshake rejection for
+	// fast self-healing (see invalidateECHConfig).
+	echConfigCache   map[string]*echCachedConfig
 	echConfigCacheMu sync.RWMutex
 
 	// Skip TLS certificate verification (for testing)
@@ -286,26 +297,45 @@ func (t *HTTP3Transport) hasSessionForHost(host string) bool {
 	return found
 }
 
-// getSpecForHost returns the appropriate ClientHelloSpec for consistent TLS fingerprint
-// Only use PSK spec (which includes early_data extension) when there's an actual session to resume.
-// Chrome does NOT send early_data extension on fresh connections - only on resumption.
+// getSpecForHost returns a FRESH ClientHelloSpec for this dial. utls ApplyPreset
+// (and quic-go's GREASE write-back) mutate the spec in place, so handing the same
+// cached spec to concurrent QUIC dials is a data race. We regenerate per call from
+// the stored ClientHelloID + shuffleSeed: the seed makes the extension order (and
+// therefore JA3/JA4) byte-identical every time, while each connection mutates its
+// own private spec. This mirrors the HTTP/2 transport, which is already race-clean.
+//
+// The PSK variant (which carries the early_data + pre_shared_key extensions) is
+// used only when there is a cached session to resume; Chrome does not send
+// early_data on a fresh connection.
 func (t *HTTP3Transport) getSpecForHost(host string) *utls.ClientHelloSpec {
-	// Only use PSK spec when there's a cached session for this host
-	// This matches Chrome's behavior: no early_data on fresh connections
-	if t.cachedClientHelloSpecPSK != nil && t.hasSessionForHost(host) {
-		return t.cachedClientHelloSpecPSK
+	if t.preset.QUICPSKClientHelloID.Client != "" && t.hasSessionForHost(host) {
+		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.QUICPSKClientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
 	}
-	return t.cachedClientHelloSpec
+	if t.clientHelloID != nil {
+		if spec, err := utls.UTLSIdToSpecWithSeed(*t.clientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
+	}
+	return nil
 }
 
-// getInnerSpecForHost returns the appropriate inner ClientHelloSpec for MASQUE connections
-// Only use PSK spec when there's an actual session to resume.
+// getInnerSpecForHost is the inner-MASQUE counterpart of getSpecForHost. Same
+// fresh-per-dial regeneration so concurrent MASQUE inner dials never share a spec;
+// kept a separate object from the outer connection for a consistent inner JA4.
 func (t *HTTP3Transport) getInnerSpecForHost(host string) *utls.ClientHelloSpec {
-	// Only use PSK spec when there's a cached session for this host
-	if t.cachedClientHelloSpecInnerPSK != nil && t.hasSessionForHost(host) {
-		return t.cachedClientHelloSpecInnerPSK
+	if t.preset.QUICPSKClientHelloID.Client != "" && t.hasSessionForHost(host) {
+		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.QUICPSKClientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
 	}
-	return t.cachedClientHelloSpecInner
+	if t.clientHelloID != nil {
+		if spec, err := utls.UTLSIdToSpecWithSeed(*t.clientHelloID, t.shuffleSeed); err == nil {
+			return &spec
+		}
+	}
+	return nil
 }
 
 // NewHTTP3Transport creates a new HTTP/3 transport
@@ -339,7 +369,7 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 		sessionCache:   sessionCache,
 		shuffleSeed:    shuffleSeed,
 		config:         config,
-		echConfigCache: make(map[string][]byte), // Cache for ECH configs (for session resumption)
+		echConfigCache: make(map[string]*echCachedConfig), // Cache for ECH configs (for session resumption)
 	}
 
 	// Get the ClientHelloID for TLS fingerprinting in QUIC
@@ -352,6 +382,7 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 		// Fallback to TCP ClientHello if no QUIC-specific one
 		clientHelloID = &preset.ClientHelloID
 	}
+	t.clientHelloID = clientHelloID // stored for fresh-spec-per-dial regeneration
 
 	// Cache the ClientHelloSpec for consistent TLS fingerprint across connections
 	// Chrome shuffles TLS extensions once per session, not per connection
@@ -492,7 +523,7 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		shuffleSeed:    shuffleSeed,
 		proxyConfig:    proxyConfig,
 		config:         config,
-		echConfigCache: make(map[string][]byte),
+		echConfigCache: make(map[string]*echCachedConfig),
 	}
 
 	// Apply localAddr from config
@@ -507,6 +538,8 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 	} else if preset.ClientHelloID.Client != "" {
 		clientHelloID = &preset.ClientHelloID
 	}
+
+	t.clientHelloID = clientHelloID // stored for fresh-spec-per-dial regeneration
 
 	// Cache ClientHelloSpec for consistent fingerprint
 	if clientHelloID != nil {
@@ -614,7 +647,7 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 		shuffleSeed:    shuffleSeed,
 		proxyConfig:    proxyConfig,
 		config:         config,
-		echConfigCache: make(map[string][]byte),
+		echConfigCache: make(map[string]*echCachedConfig),
 	}
 
 	// Apply localAddr from config
@@ -629,6 +662,8 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 	} else if preset.ClientHelloID.Client != "" {
 		clientHelloID = &preset.ClientHelloID
 	}
+
+	t.clientHelloID = clientHelloID // stored for fresh-spec-per-dial regeneration
 
 	// Cache ClientHelloSpec for consistent fingerprint (outer connection to proxy)
 	if clientHelloID != nil {
@@ -727,9 +762,13 @@ func (t *HTTP3Transport) dialQUICWithMASQUE(ctx context.Context, addr string, tl
 		return nil, fmt.Errorf("invalid port: %w", err)
 	}
 
-	// Establish MASQUE tunnel with Chrome fingerprinting
-	// Use the preset's TLS/QUIC config for the proxy connection too
-	err = t.masqueConn.EstablishWithQUICConfig(ctx, connectHost, portInt, t.tlsConfig, t.quicConfig)
+	// Establish MASQUE tunnel with Chrome fingerprinting.
+	// Clone the config and hand the outer establish its own fresh ClientHelloSpec
+	// (rather than the shared t.quicConfig base) so a concurrent first-use of the
+	// tunnel can't race-mutate one spec via ApplyPreset.
+	masqueCfg := t.quicConfig.Clone()
+	masqueCfg.CachedClientHelloSpec = t.getSpecForHost(connectHost)
+	err = t.masqueConn.EstablishWithQUICConfig(ctx, connectHost, portInt, t.tlsConfig, masqueCfg)
 	if err != nil {
 		return nil, fmt.Errorf("MASQUE tunnel establishment failed: %w", err)
 	}
@@ -1240,6 +1279,28 @@ func (t *HTTP3Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	// Cookie crumbling (H3/QPACK). Chrome and Firefox split the Cookie header
+	// into one QPACK field per cookie-pair (Chromium ValueSplittingHeaderList,
+	// CookieCrumbling::kEnabled). quic-go's request writer emits one field per
+	// header value and does NOT crumble, so we pre-split the single joined Cookie
+	// value into crumbs here; quic-go then writes one "cookie" field per crumb,
+	// contiguous in the cookie header-order slot and already marked never-indexed.
+	// Gated by the preset's cookie-split flag (false => crumble): Chrome and
+	// Firefox crumble, Safari/WebKit sends a single field. Safe to mutate
+	// req.Header: each request is per-call, and raceH3H2 dispatches a request to
+	// exactly one protocol (doHTTP3 OR doHTTP2), never both concurrently.
+	if !t.preset.H2DisableCookieSplit() {
+		if cookies := req.Header.Values("Cookie"); len(cookies) > 0 {
+			crumbs := make([]string, 0, len(cookies))
+			for _, c := range cookies {
+				crumbs = append(crumbs, crumbleCookie(c)...)
+			}
+			if len(crumbs) > 0 {
+				req.Header["Cookie"] = crumbs
+			}
+		}
+	}
+
 	// For domain fronting: swap req.URL.Host to connectHost so http3.Transport
 	// pools connections by connect host (multiple request hosts share one QUIC connection).
 	// Preserve original host in req.Host for the :authority pseudo-header.
@@ -1294,6 +1355,13 @@ func (t *HTTP3Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	_ = reqNum
 	_ = dialsBefore
 	_ = dialsAfter
+
+	// A handshake-level rejection on H3 usually means the cached ECH config went
+	// stale (e.g. the CDN rotated ECH keys). Drop it so the next request refetches
+	// a fresh config instead of spamming the same failure until a process restart.
+	if isECHRejectionError(err) {
+		t.invalidateECHConfig(connectHost)
+	}
 
 	return resp, err
 }
@@ -1475,6 +1543,33 @@ func is0RTTRejectedError(err error) bool {
 	return strings.Contains(err.Error(), "0-RTT rejected")
 }
 
+// isECHRejectionError reports whether a QUIC dial error looks like a TLS
+// handshake rejection of the ClientHello, which on H3 most often means the
+// cached ECH config went stale (e.g. the CDN rotated its ECH keys). Matched
+// narrowly on handshake/TLS signals so plain network timeouts (which the cache
+// TTL handles anyway) do not churn the ECH cache.
+func isECHRejectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	for _, m := range []string{
+		"CRYPTO_ERROR",
+		"illegal parameter",
+		"bad_record_mac",
+		"decrypt_error",
+		"decode_error",
+		"handshake failure",
+		"ECH",
+		"encrypted_client_hello",
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // recreateTransport recreates the HTTP/3 transport after 0-RTT rejection
 // This is called from RoundTrip when the server rejects early data
 func (t *HTTP3Transport) recreateTransport() {
@@ -1522,7 +1617,7 @@ func (t *HTTP3Transport) GetECHConfigCache() map[string][]byte {
 	// Return a copy to avoid race conditions
 	result := make(map[string][]byte, len(t.echConfigCache))
 	for k, v := range t.echConfigCache {
-		result[k] = v
+		result[k] = v.config
 	}
 	return result
 }
@@ -1534,14 +1629,35 @@ func (t *HTTP3Transport) SetECHConfigCache(configs map[string][]byte) {
 	t.echConfigCacheMu.Lock()
 	defer t.echConfigCacheMu.Unlock()
 
+	exp := time.Now().Add(echTransportCacheTTL)
 	for k, v := range configs {
-		t.echConfigCache[k] = v
+		t.echConfigCache[k] = &echCachedConfig{config: v, expiresAt: exp}
 	}
+}
+
+// invalidateECHConfig drops the cached ECH config for a host on both the
+// transport and the shared DNS cache, so the next dial refetches a fresh one.
+// Called after a handshake rejection that suggests the config went stale (for
+// example the CDN rotated ECH keys), so a long-lived session self-heals instead
+// of spamming the same failure until restart.
+func (t *HTTP3Transport) invalidateECHConfig(host string) {
+	t.echConfigCacheMu.Lock()
+	delete(t.echConfigCache, host)
+	t.echConfigCacheMu.Unlock()
+	dns.InvalidateECHConfig(host)
 }
 
 // Connect establishes a QUIC connection to the host without making a request.
 // This is used for protocol racing - the first protocol to connect wins.
 func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
+	// Proxied transports MUST probe through the proxy. The direct quic.DialAddr
+	// probe below would dial the target straight from the local socket, leaking
+	// the real client IP and never actually testing whether QUIC relays through
+	// the proxy. Route through the same dial path doHTTP3 uses for real requests.
+	if t.masqueConn != nil || t.udpbaraTunnel != nil {
+		return t.connectViaProxy(ctx, host, port)
+	}
+
 	// Use connect host for DNS resolution (may differ for domain fronting)
 	connectHost := t.getConnectHost(host)
 	addr := net.JoinHostPort(connectHost, port)
@@ -1590,6 +1706,10 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 
 	// Build QUIC config from preset getters (same fingerprint as real connections)
 	quicCfg := t.buildQUICConfig(clientHelloID, quicIdleTimeout, 0)
+	// buildQUICConfig embeds the shared base spec; concurrent probes would
+	// race-mutate it via ApplyPreset. Hand this probe its own fresh spec
+	// (same seed -> identical fingerprint, private object -> no race).
+	quicCfg.CachedClientHelloSpec = t.getSpecForHost(host)
 	if len(echConfigList) > 0 {
 		quicCfg.ECHConfigList = echConfigList
 	}
@@ -1597,6 +1717,11 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 	// Try to establish QUIC connection
 	conn, err := quic.DialAddr(ctx, resolvedAddr, tlsCfg, quicCfg)
 	if err != nil {
+		// Stale ECH (e.g. CDN key rotation) shows up here as a handshake
+		// rejection; drop the cached config so the next probe refetches.
+		if isECHRejectionError(err) {
+			t.invalidateECHConfig(host)
+		}
 		return fmt.Errorf("QUIC dial failed: %w", err)
 	}
 
@@ -1612,6 +1737,54 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 	_ = conn.CloseWithError(0, "connect probe")
 	_ = addr // suppress unused warning
 
+	return nil
+}
+
+// connectViaProxy runs the H3 reachability probe THROUGH the configured proxy
+// (SOCKS5 UDP relay or MASQUE), mirroring the dial path doHTTP3 uses for real
+// requests. This is what makes raceH3H2 safe over a proxy: the probe tunnels
+// instead of dialing the target directly, so no real-IP leak and the race
+// actually learns whether QUIC relays through the proxy. The dialFunc selection
+// must stay in sync with Refresh()/recreateTransport().
+func (t *HTTP3Transport) connectViaProxy(ctx context.Context, host, port string) error {
+	var dialFunc func(context.Context, string, *tls.Config, *quic.Config) (*quic.Conn, error)
+	if t.masqueConn != nil {
+		dialFunc = t.dialQUICWithMASQUE
+	} else {
+		dialFunc = t.dialQUICWithProxy
+	}
+
+	// Match the key log writer selection used by the direct probe / dial path.
+	var keyLogWriter io.Writer
+	if t.config != nil && t.config.KeyLogWriter != nil {
+		keyLogWriter = t.config.KeyLogWriter
+	} else {
+		keyLogWriter = GetKeyLogWriter()
+	}
+
+	// SNI = request host, h3 ALPN. dialQUICWithMASQUE clones this and overrides
+	// ServerName; dialQUICWithProxy clones t.tlsConfig and ignores this. Both
+	// build their own quic.Config, so the cfg arg is unused (pass nil).
+	tlsCfg := &tls.Config{
+		ServerName:         host,
+		NextProtos:         []string{"h3"},
+		InsecureSkipVerify: t.insecureSkipVerify,
+		KeyLogWriter:       keyLogWriter,
+	}
+
+	conn, err := dialFunc(ctx, net.JoinHostPort(host, port), tlsCfg, nil)
+	if err != nil {
+		// A handshake rejection here usually means stale ECH (CDN key rotation);
+		// drop the cached config so the next probe refetches.
+		if isECHRejectionError(err) {
+			t.invalidateECHConfig(host)
+		}
+		return fmt.Errorf("QUIC dial via proxy failed: %w", err)
+	}
+
+	// Probe only: tear down so the real request dials its own connection. The
+	// per-connection cleanup goroutine in the dial func removes proxy state.
+	_ = conn.CloseWithError(0, "connect probe")
 	return nil
 }
 
@@ -1686,19 +1859,32 @@ func (t *HTTP3Transport) getConnectHost(requestHost string) string {
 	return requestHost
 }
 
-// getECHConfig returns the ECH config for a host
+// echCachedConfig is a per-host ECH config with an expiry, so a long-lived
+// transport refetches periodically instead of pinning one config forever.
+type echCachedConfig struct {
+	config    []byte
+	expiresAt time.Time
+}
+
+// echTransportCacheTTL bounds how long the transport reuses a cached ECH config
+// before re-consulting DNS. Short enough to pick up a CDN key rotation without
+// waiting for a process restart; the underlying DNS cache still honors the
+// record's own TTL, so this is just an upper bound on staleness.
+const echTransportCacheTTL = 5 * time.Minute
+
+// getECHConfig returns the ECH config for a host, refetching once the cached
+// entry expires. (The cache mainly keeps the same config across the connections
+// of one logical request; it must NOT pin a stale config forever, or a CDN ECH
+// key rotation strands the session on a retired key until restart.)
 func (t *HTTP3Transport) getECHConfig(ctx context.Context, targetHost string) []byte {
-	// First, check if we have a cached ECH config for this host
-	// This is critical for session resumption - we must use the same ECH config
-	// that was used when creating the original session ticket
 	t.echConfigCacheMu.RLock()
-	if cachedConfig, ok := t.echConfigCache[targetHost]; ok {
+	if cached, ok := t.echConfigCache[targetHost]; ok && time.Now().Before(cached.expiresAt) {
 		t.echConfigCacheMu.RUnlock()
-		return cachedConfig
+		return cached.config
 	}
 	t.echConfigCacheMu.RUnlock()
 
-	// No cached config - fetch from DNS or config
+	// No fresh cached config - fetch from DNS or config
 	var echConfig []byte
 	if t.config == nil {
 		echConfig, _ = dns.FetchECHConfigs(ctx, targetHost)
@@ -1706,10 +1892,12 @@ func (t *HTTP3Transport) getECHConfig(ctx context.Context, targetHost string) []
 		echConfig = t.config.GetECHConfig(ctx, targetHost)
 	}
 
-	// Cache the ECH config for future use (session resumption)
 	if echConfig != nil {
 		t.echConfigCacheMu.Lock()
-		t.echConfigCache[targetHost] = echConfig
+		t.echConfigCache[targetHost] = &echCachedConfig{
+			config:    echConfig,
+			expiresAt: time.Now().Add(echTransportCacheTTL),
+		}
 		t.echConfigCacheMu.Unlock()
 	}
 

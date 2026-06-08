@@ -113,6 +113,68 @@ internal static class Native
     [DllImport(LibraryName, EntryPoint = "httpcloak_clear_cookies", CallingConvention = CallingConvention.Cdecl)]
     public static extern void ClearCookies(long handle);
 
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_clear_cache", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionClearCache(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_stats", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr SessionStats(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_idle_time", CallingConvention = CallingConvention.Cdecl)]
+    public static extern long SessionIdleTime(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_is_active", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionIsActive(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_touch", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionTouch(long handle);
+
+    // Chunked upload state machine (mirrors Python's stream_upload). Lets
+    // callers ship arbitrarily-large bodies without buffering in managed
+    // memory: UploadStart opens an io.Pipe on the Go side, UploadWriteRaw
+    // streams chunks straight to the wire, UploadFinish reads the response,
+    // UploadCancel tears down a partial upload on error.
+    [DllImport(LibraryName, EntryPoint = "httpcloak_upload_start", CallingConvention = CallingConvention.Cdecl)]
+    public static extern long UploadStart(long sessionHandle, [MarshalAs(UnmanagedType.LPUTF8Str)] string url, [MarshalAs(UnmanagedType.LPUTF8Str)] string optionsJson);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_upload_write_raw", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int UploadWriteRaw(long uploadHandle, IntPtr buffer, int len);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_upload_finish", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr UploadFinish(long uploadHandle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_upload_cancel", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void UploadCancel(long uploadHandle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_conditional_cache", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetConditionalCache(long handle, int enabled);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_conditional_cache", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetConditionalCache(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_client_hints", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetClientHints(long handle, int enabled);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_client_hints", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetClientHints(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_high_entropy_client_hints", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetHighEntropyClientHints(long handle, int enabled);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_high_entropy_client_hints", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetHighEntropyClientHints(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_follow_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetFollowRedirects(long handle, int enabled);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_follow_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetFollowRedirects(long handle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_set_max_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SessionSetMaxRedirects(long handle, int max);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_session_get_max_redirects", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int SessionGetMaxRedirects(long handle);
+
     [DllImport(LibraryName, EntryPoint = "httpcloak_free_string", CallingConvention = CallingConvention.Cdecl)]
     public static extern void FreeString(IntPtr str);
 
@@ -232,6 +294,12 @@ internal static class Native
     [DllImport(LibraryName, EntryPoint = "httpcloak_local_proxy_unregister_session", CallingConvention = CallingConvention.Cdecl)]
     public static extern int LocalProxyUnregisterSession(long proxyHandle, [MarshalAs(UnmanagedType.LPUTF8Str)] string sessionId);
 
+    [DllImport(LibraryName, EntryPoint = "httpcloak_local_proxy_list_sessions", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr LocalProxyListSessions(long proxyHandle);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_local_proxy_has_session", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int LocalProxyHasSession(long proxyHandle, [MarshalAs(UnmanagedType.LPUTF8Str)] string sessionId);
+
     // Custom preset loading
     [DllImport(LibraryName, EntryPoint = "httpcloak_preset_load_file", CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr PresetLoadFile([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
@@ -323,4 +391,68 @@ internal static class Native
 
         return Marshal.PtrToStringUTF8(ptr);
     }
+
+    // =========================================================================
+    // Distributed session cache callbacks (sync flavor).
+    // Each delegate's IntPtr arguments are raw const char* pointers from the Go
+    // side; the managed body marshals via Marshal.PtrToStringUTF8. The Get-type
+    // delegates return IntPtr to a malloc'd C string (the Go side copies via
+    // C.GoString and never frees), so the SessionCacheBackend wrapper holds the
+    // last-returned pointer in a field and frees it on the next invocation.
+    // =========================================================================
+
+    /// <summary>
+    /// Sync session cache GET callback. Returns IntPtr.Zero for "not found",
+    /// or a pointer to a UTF-8 C string containing the JSON-serialised
+    /// transport.TLSSessionState.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate IntPtr SessionCacheGetCallback(IntPtr key);
+
+    /// <summary>
+    /// Sync session cache PUT callback. Returns 0 on success, non-zero on
+    /// failure.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate int SessionCachePutCallback(IntPtr key, IntPtr valueJson, long ttlSeconds);
+
+    /// <summary>
+    /// Sync session cache DELETE callback. Returns 0 on success, non-zero on
+    /// failure.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate int SessionCacheDeleteCallback(IntPtr key);
+
+    /// <summary>
+    /// Sync ECH cache GET callback. Returns IntPtr.Zero for "not found", or
+    /// a pointer to a UTF-8 C string containing the base64-encoded ECH config.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate IntPtr EchCacheGetCallback(IntPtr key);
+
+    /// <summary>
+    /// Sync ECH cache PUT callback. Returns 0 on success, non-zero on failure.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate int EchCachePutCallback(IntPtr key, IntPtr valueBase64, long ttlSeconds);
+
+    /// <summary>
+    /// Cache error callback. Fired when the backend reports an error from any
+    /// op (get / put / delete). Receives the operation name, key and error
+    /// message strings.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void SessionCacheErrorCallback(IntPtr operation, IntPtr key, IntPtr error);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_set_session_cache_callbacks", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void SetSessionCacheCallbacks(
+        SessionCacheGetCallback get,
+        SessionCachePutCallback put,
+        SessionCacheDeleteCallback delete,
+        EchCacheGetCallback echGet,
+        EchCachePutCallback echPut,
+        SessionCacheErrorCallback onError);
+
+    [DllImport(LibraryName, EntryPoint = "httpcloak_clear_session_cache_callbacks", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void ClearSessionCacheCallbacks();
 }

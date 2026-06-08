@@ -1,0 +1,99 @@
+# httpcloak
+
+> Go HTTP client library that emits TLS, HTTP/2, and HTTP/3 wire bytes byte-identical to real Chrome / Firefox / Safari handshakes. Bindings ship for Go, Python, Node.js, and .NET via a shared cgo library.
+
+httpcloak handles uTLS-backed TLS fingerprinting, HTTP/1.1, HTTP/2 with akamai-style fingerprinting, HTTP/3 over QUIC, proxy support (HTTP CONNECT, SOCKS5 with optional UDP, MASQUE), per-resource RFC 7540 / RFC 9218 stream priorities, ECH (Encrypted Client Hello), and a full preset registry covering Chrome 133-149, Firefox 133/148, Safari 17/18 and their per-OS variants. The JSON preset builder lets you describe a built-in preset, mutate the JSON, and load it back as a custom registration without rebuilding.
+
+## Getting Started
+
+- [Homepage](https://httpcloak.dev/): what the library is, four-language quickstart, feature catalog.
+- [Installation](https://httpcloak.dev/installation): per-binding install commands.
+- [First Request](https://httpcloak.dev/getting-started/first-request): the four-line "does it work" check across Go, Python, Node.js, .NET.
+- [Presets Explained](https://httpcloak.dev/getting-started/presets-explained): what a preset is (TLS + H2 + headers + priority bundle), inheritance, picking the right one.
+- [Common Options](https://httpcloak.dev/getting-started/common-options): timeouts, retries, redirects, headers, jar control, source address.
+
+## Proxies
+
+- [Overview](https://httpcloak.dev/proxies): four proxy types and when to use each.
+- [HTTP CONNECT](https://httpcloak.dev/proxies/http-connect): plain TCP CONNECT proxy.
+- [SOCKS5](https://httpcloak.dev/proxies/socks5): SOCKS5 with username/password auth, residential workhorse.
+- [SOCKS5 UDP](https://httpcloak.dev/proxies/socks5-udp): UDP_ASSOCIATE for HTTP/3 over SOCKS5.
+- [MASQUE](https://httpcloak.dev/proxies/masque): HTTP/3 CONNECT-UDP, QUIC inside QUIC.
+- [Source Address Binding](https://httpcloak.dev/proxies/source-address-binding): WithLocalAddress, WithLocalAddrIP, IPv6 freebind for prefix rotation.
+
+## Cookies and State
+
+- [Cookie Jar](https://httpcloak.dev/cookies-and-state/cookie-jar): default behavior, what gets stored, lifecycle.
+- [Disabling the Cookie Jar](https://httpcloak.dev/cookies-and-state/disabling-cookie-jar): WithoutCookieJar() and use cases.
+- [Per-Request Cookies](https://httpcloak.dev/cookies-and-state/per-request-cookies): manual Cookie headers.
+- [Domain and Path Matching](https://httpcloak.dev/cookies-and-state/domain-and-path-matching): the four-check matching pipeline.
+
+## Fingerprinting
+
+- [What is TLS Fingerprinting](https://httpcloak.dev/fingerprinting/what-is-tls-fingerprinting): JA3, JA4, akamai HTTP/2 hash explained.
+- [Presets](https://httpcloak.dev/fingerprinting/presets): full list of bundled browser profiles.
+- [JSON Preset Builder](https://httpcloak.dev/fingerprinting/json-preset-builder): describe_preset, mutate JSON, load_preset_from_json.
+- [Custom JA3](https://httpcloak.dev/fingerprinting/custom-ja3): WithCustomFingerprint with a raw JA3 string.
+- [Akamai Shorthand](https://httpcloak.dev/fingerprinting/akamai-shorthand): the H2 shorthand format and one-knob overrides.
+- [Per-Resource Priority](https://httpcloak.dev/fingerprinting/per-resource-priority): RFC 7540 stream weights and RFC 9218 priority headers from Sec-Fetch-Dest.
+
+## Connection Lifecycle
+
+- [Refresh](https://httpcloak.dev/connection-lifecycle/refresh): drop live connections, keep tickets and cookies.
+- [Warmup](https://httpcloak.dev/connection-lifecycle/warmup): multi-hop browser-style preflight.
+- [Protocol Switching](https://httpcloak.dev/connection-lifecycle/protocol-switching): force H1, H2, or H3 mid-session.
+- [Session Save and Restore](https://httpcloak.dev/connection-lifecycle/session-save-restore): persist a session to disk, resume across processes.
+- [Fork (Sibling Sessions)](https://httpcloak.dev/connection-lifecycle/fork): N siblings sharing cookies and TLS state with separate connection pools.
+
+## HTTP Protocols
+
+- [HTTP/1.1](https://httpcloak.dev/http-protocols/http1): when H1 is forced, what's negotiated.
+- [HTTP/2](https://httpcloak.dev/http-protocols/http2): default for most modern hosts, SETTINGS and PRIORITY behavior.
+- [HTTP/3 over QUIC](https://httpcloak.dev/http-protocols/http3-quic): QUIC over UDP, 0-RTT, sardanioss/quic-go fork.
+- [Auto-Negotiation](https://httpcloak.dev/http-protocols/auto-negotiation): how the library picks H1 vs H2 vs H3.
+
+## Advanced TLS
+
+- [ECH (Encrypted Client Hello)](https://httpcloak.dev/advanced-tls/ech): on by default, WithDisableECH and WithECHFrom.
+- [Speculative TLS](https://httpcloak.dev/advanced-tls/speculative-tls): pipeline CONNECT and ClientHello, save 1 RTT per proxied dial.
+- [TLS Keylog](https://httpcloak.dev/advanced-tls/tls-keylog): SSLKEYLOGFILE for Wireshark decryption.
+- [Domain Fronting](https://httpcloak.dev/advanced-tls/domain-fronting): SNI != Host wiring.
+- [Certificate Pinning](https://httpcloak.dev/advanced-tls/cert-pinning): SPKI / cert-hash pinning, CertPinner API.
+
+## Requests and Responses
+
+- [Headers](https://httpcloak.dev/requests-and-responses/headers): header order, custom headers, preset defaults.
+- [JSON Bodies](https://httpcloak.dev/requests-and-responses/json-bodies): sending and receiving JSON.
+- [Form Data and Multipart](https://httpcloak.dev/requests-and-responses/form-data-and-multipart): x-www-form-urlencoded and multipart/form-data.
+- [Streaming Responses](https://httpcloak.dev/requests-and-responses/streaming-responses): DoStream(), iter_content / iter_lines / SSE.
+- [Error Handling](https://httpcloak.dev/requests-and-responses/error-handling): network errors vs status-code errors, retry guidance.
+- [Authentication](https://httpcloak.dev/requests-and-responses/auth): BasicAuth, BearerAuth, DigestAuth, custom Auth interface.
+- [Hooks](https://httpcloak.dev/requests-and-responses/hooks): PreRequest and PostResponse middleware.
+
+## Bindings
+
+- [Go](https://httpcloak.dev/bindings/go): native API. `go get github.com/sardanioss/httpcloak`.
+- [Python](https://httpcloak.dev/bindings/python): `pip install httpcloak`.
+- [Node.js](https://httpcloak.dev/bindings/nodejs): `npm install httpcloak`.
+- [.NET](https://httpcloak.dev/bindings/dotnet): `dotnet add package HttpCloak`.
+
+## Reference
+
+- [Options](https://httpcloak.dev/reference/options): every WithX option in one table.
+- [Presets](https://httpcloak.dev/reference/presets): every preset's JA3, JA4, akamai hash, default UA.
+- [JSON Preset Spec](https://httpcloak.dev/reference/json-preset-spec): canonical JSON schema for load_preset_from_json.
+- [Architecture](https://httpcloak.dev/reference/architecture): high-level component map.
+
+## Recipes
+
+- [Multi-Proxy Rotation With State](https://httpcloak.dev/recipes/multi-proxy-rotation-with-state): rotate proxies while keeping the same TLS session.
+- [Build Custom Chrome From tls.peet.ws](https://httpcloak.dev/recipes/build-custom-chrome-from-tls-peet): turn a tls.peet capture into a custom JSON preset.
+- [Long-Running Scraper Patterns](https://httpcloak.dev/recipes/long-running-scraper-patterns): Refresh, Warmup, cookie strategies for multi-day scrapers.
+- [Debug With Wireshark](https://httpcloak.dev/recipes/debug-with-wireshark): keylog plus filter recipes.
+- [Local Proxy Server](https://httpcloak.dev/recipes/local-proxy-server): run httpcloak as an HTTP proxy any client can point at.
+
+## Optional
+
+- [Changelog](https://httpcloak.dev/changelog): release notes.
+- [GitHub Repository](https://github.com/sardanioss/httpcloak): source code and issue tracker.
+- [Full Markdown Dump](https://httpcloak.dev/llms-full.txt): every chapter concatenated into a single file for AI agents.
