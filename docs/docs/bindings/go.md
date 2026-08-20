@@ -92,9 +92,11 @@ Full method list on `*httpcloak.Session`, top to bottom.
 func NewSession(preset string, opts ...SessionOption) *Session
 func LoadSession(path string) (*Session, error)
 func UnmarshalSession(data []byte) (*Session, error)
+func LoadSessionWithOptions(path string, opts *SessionLoadOptions) (*Session, error)
+func UnmarshalSessionWithOptions(data []byte, opts *SessionLoadOptions) (*Session, error)
 ```
 
-`NewSession` is the normal entry point. `LoadSession` and `UnmarshalSession` rebuild a session from a file or JSON blob saved earlier, see [Session save & restore](/connection-lifecycle/session-save-restore).
+`NewSession` is the normal entry point. `LoadSession` and `UnmarshalSession` rebuild a session from a file or JSON blob saved earlier, see [Session save & restore](/connection-lifecycle/session-save-restore). The `WithOptions` pair takes back the certificate verification hooks, which JSON cannot carry; a plain load of a session that had them returns an error instead of quietly restoring a weaker one.
 
 ### Core request
 
@@ -224,6 +226,8 @@ func NewSession(preset string, opts ...SessionOption) *Session
 func NewManager() *Manager                              // session.Manager re-export
 func LoadSession(path string) (*Session, error)
 func UnmarshalSession(data []byte) (*Session, error)
+func LoadSessionWithOptions(path string, opts *SessionLoadOptions) (*Session, error)
+func UnmarshalSessionWithOptions(data []byte, opts *SessionLoadOptions) (*Session, error)
 func ValidateSessionFile(path string) error             // pre-flight load check
 func SetKeyLogWriter(w io.Writer)                       // process-wide TLS keylog sink
 func Presets() []string                                 // all registered preset names
@@ -313,9 +317,12 @@ func (r *Response) Text() (string, error)
 func (r *Response) JSON(v interface{}) error
 func (r *Response) GetHeader(key string) string
 func (r *Response) GetHeaders(key string) []string
+func (r *Response) Location() (*url.URL, error)
 ```
 
 `Bytes`, `Text`, `JSON` cache the body after the first read. `GetHeader` / `GetHeaders` look up case-insensitively against the lowercase keys.
+
+`Location` mirrors `net/http`'s `Response.Location`: it parses the `Location` header and resolves a relative target against the URL that produced the response (`FinalURL`), so a 3xx surfaced with redirects disabled gives you the absolute next URL directly. It returns `httpcloak.ErrNoLocation` when the response has no `Location` header.
 
 `History` is the list of intermediate redirects the request went through. Each entry has `StatusCode`, `URL`, and `Headers`.
 

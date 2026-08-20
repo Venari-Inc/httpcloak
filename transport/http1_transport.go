@@ -11,8 +11,10 @@ import (
 	http "github.com/sardanioss/http"
 	"net/textproto"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sardanioss/httpcloak/dns"
@@ -42,6 +44,7 @@ type HTTP1Transport struct {
 	connectTimeout      time.Duration
 	responseTimeout     time.Duration
 	insecureSkipVerify  bool
+	tlsVerify           *TLSVerify
 	localAddr           string // Local IP to bind outgoing connections
 
 	// Cleanup
@@ -63,6 +66,116 @@ type http1Conn struct {
 	useCount   int64
 	mu         sync.Mutex
 	closed     bool
+	// poisoned marks a connection interrupted mid-exchange by a cancelled
+	// request context. Atomic rather than guarded by mu: it is set from the
+	// context watchdog while doRequest holds mu for the whole exchange.
+	poisoned atomic.Bool
+}
+
+// poison unblocks whatever this connection is currently blocked on and retires
+// it: the socket is dropped, not merely flagged.
+//
+// It deliberately goes straight at the socket instead of calling close().
+// doRequest holds c.mu for the full duration of an exchange and close() also
+// takes c.mu, so a watchdog routed through close() would wait on the very read
+// it is trying to interrupt. c.mu guards the bookkeeping, though, not the
+// socket: SetDeadline and Close both need no lock, are safe from another
+// goroutine, and either one unblocks an in-flight Read or Write. Closing as
+// well as moving the deadline means no ordering accident can hand a live but
+// poisoned connection to the next request.
+//
+// c.closed stays false so a later close() still runs its bookkeeping; the
+// second Close on the socket is a no-op error we do not care about.
+func (c *http1Conn) poison() {
+	c.poisoned.Store(true)
+	if c.conn == nil {
+		return
+	}
+	c.conn.SetDeadline(time.Now())
+	c.conn.Close()
+}
+
+// contextError reports why the request context ended, or nil if it has not.
+//
+// It also claims a socket deadline that fired at or past the context's own
+// deadline. doRequest arms the socket deadline from the context deadline, so
+// the two expire together and the socket read typically loses the race by
+// microseconds — reporting the raw "i/o timeout" there would hand the caller an
+// opaque network error for what is really their own deadline, and defeat an
+// errors.Is(err, context.DeadlineExceeded) check.
+func contextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// translateBodyError reports a body read that ended because the caller gave up
+// as the caller's own cancellation. Without it they get the raw socket error the
+// poisoned deadline produced ("i/o timeout"), indistinguishable from a genuine
+// network fault, and a retry loop happily re-issues a request the caller
+// deliberately abandoned. RoundTrip covers the header wait this way already;
+// the body read is the longer and more commonly cancelled half.
+//
+// It does not gate on conn.poisoned: when the context carried a deadline,
+// doRequest armed the socket with that same deadline, so the read fails on its
+// own a hair before the watchdog gets there and poisoned is still false.
+func translateBodyError(ctx context.Context, err error) error {
+	if ctx == nil {
+		return err
+	}
+	if ctxErr := contextError(ctx); ctxErr != nil {
+		return ctxErr
+	}
+	return err
+}
+
+// watchContext makes a cancelled context interrupt an in-flight HTTP/1.1
+// exchange, and returns a function that stops watching.
+//
+// HTTP/2 and HTTP/3 select on ctx.Done() in their own request paths, but the
+// HTTP/1.1 exchange blocks in a socket read that only a deadline can interrupt.
+// Without this, a cancelled context is invisible: doRequest converts the
+// context's *deadline* into a socket deadline once, at the start, and then never
+// looks at the context again. A caller who cancels therefore waits out the full
+// response timeout — up to 30s past the moment they gave up.
+func watchContext(ctx context.Context, conn *http1Conn) func() {
+	done := ctx.Done()
+	if done == nil {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-done:
+			// Both channels can be closed by the time this goroutine runs: the
+			// exchange finishes, then doHTTP1's deferred cancel fires micro-
+			// seconds later. A select with two ready cases picks at random, so
+			// re-check before poisoning a connection that already completed.
+			select {
+			case <-stop:
+			default:
+				conn.poison()
+			}
+		case <-stop:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stop)
+			// Wait for the watchdog to settle. Callers read conn.poisoned right
+			// after this returns to decide whether to pool the connection; the
+			// value has to be final by then, or a poisoned connection races
+			// into the pool.
+			<-exited
+		})
+	}
 }
 
 // NewHTTP1Transport creates a new HTTP/1.1 transport with uTLS
@@ -136,7 +249,27 @@ func (t *HTTP1Transport) getConnectHost(requestHost string) string {
 	return requestHost
 }
 
+// Preset returns the profile new connections are built from.
+func (t *HTTP1Transport) Preset() *fingerprint.Preset { return t.preset }
+
 // SetInsecureSkipVerify sets whether to skip TLS verification
+// SetPreset swaps the browser profile used for subsequent connections and
+// drops idle pooled connections built from the old one, so a profile switch
+// cannot keep serving the previous browser's fingerprint.
+func (t *HTTP1Transport) SetPreset(preset *fingerprint.Preset) {
+	if preset == nil {
+		return
+	}
+	t.preset = preset
+	t.Refresh()
+}
+
+// SetTLSVerify installs caller-supplied certificate verification hooks.
+// Only verification is configurable; nothing here affects the ClientHello.
+func (t *HTTP1Transport) SetTLSVerify(v *TLSVerify) {
+	t.tlsVerify = v
+}
+
 func (t *HTTP1Transport) SetInsecureSkipVerify(skip bool) {
 	t.insecureSkipVerify = skip
 }
@@ -180,42 +313,76 @@ func (t *HTTP1Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Try to get an idle connection
 	conn, err := t.getIdleConn(key)
 	if err == nil && conn != nil {
+		stopWatch := watchContext(req.Context(), conn)
 		resp, err := t.doRequest(conn, req)
-		if err == nil {
+		if err == nil && req.Context().Err() == nil {
 			// Wrap the body to handle connection lifecycle
 			// Connection will be returned to pool or closed when body is fully read
 			resp.Body = &pooledBodyWrapper{
-				body:        resp.Body,
-				conn:        conn,
-				key:         key,
-				transport:   t,
-				keepAlive:   t.shouldKeepAlive(req, resp),
+				body:      resp.Body,
+				conn:      conn,
+				key:       key,
+				transport: t,
+				keepAlive: t.shouldKeepAlive(req, resp),
+				stopWatch: stopWatch,
+				ctx:       req.Context(),
 			}
 			return resp, nil
 		}
 		// Connection failed, close it and try new one
+		stopWatch()
 		conn.close()
+		// A cancelled context is the caller giving up, not a bad connection:
+		// report it as such instead of retrying on a fresh socket.
+		if ctxErr := contextError(req.Context()); ctxErr != nil {
+			return nil, ctxErr
+		}
+		// doRequest streams the body out as it writes, so an attempt that died
+		// on a stale pooled connection may have consumed it. Re-open it before
+		// retrying below. Without this the retry goes out carrying the
+		// Content-Length it already computed with nothing behind it: the server
+		// blocks waiting for a body that never arrives, and neither end reports
+		// anything wrong. GetBody is set by http.NewRequestWithContext for every
+		// in-memory body; one that cannot be re-opened cannot be retried at all,
+		// so the connection error stands rather than a corrupt request going out.
+		if req.Body != nil && req.Body != http.NoBody {
+			if req.GetBody == nil {
+				return nil, WrapError("request", host, port, "h1", err)
+			}
+			rc, gerr := req.GetBody()
+			if gerr != nil {
+				return nil, WrapError("request", host, port, "h1", gerr)
+			}
+			req.Body = rc
+		}
 	}
 
 	// Create new connection (pass request host for SNI, connectHost used internally for DNS)
-	conn, err = t.createConn(req.Context(), host, port, scheme)
+	conn, err = t.createConnRetry(req.Context(), host, port, scheme)
 	if err != nil {
 		return nil, err
 	}
 
+	stopWatch := watchContext(req.Context(), conn)
 	resp, err := t.doRequest(conn, req)
-	if err != nil {
+	if err != nil || req.Context().Err() != nil {
+		stopWatch()
 		conn.close()
+		if ctxErr := contextError(req.Context()); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, WrapError("request", host, port, "h1", err)
 	}
 
 	// Wrap the body to handle connection lifecycle
 	resp.Body = &pooledBodyWrapper{
-		body:        resp.Body,
-		conn:        conn,
-		key:         key,
-		transport:   t,
-		keepAlive:   t.shouldKeepAlive(req, resp),
+		body:      resp.Body,
+		conn:      conn,
+		key:       key,
+		transport: t,
+		keepAlive: t.shouldKeepAlive(req, resp),
+		stopWatch: stopWatch,
+		ctx:       req.Context(),
 	}
 
 	return resp, nil
@@ -252,16 +419,23 @@ func (t *HTTP1Transport) RoundTripWithTLSConn(req *http.Request, tlsConn *utls.U
 		bw:         bufio.NewWriterSize(tlsConn, 256*1024), // 256KB write buffer
 	}
 
+	stopWatch := watchContext(req.Context(), conn)
 	resp, err := t.doRequest(conn, req)
-	if err != nil {
+	if err != nil || req.Context().Err() != nil {
+		stopWatch()
 		conn.close()
+		if ctxErr := contextError(req.Context()); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, WrapError("request", host, port, "h1", err)
 	}
 
 	// Wrap the body to close connection when done (not pooled since it came from H2 attempt)
 	resp.Body = &streamBodyWrapper{
-		body: resp.Body,
-		conn: conn,
+		body:      resp.Body,
+		conn:      conn,
+		stopWatch: stopWatch,
+		ctx:       req.Context(),
 	}
 
 	return resp, nil
@@ -276,12 +450,20 @@ type pooledBodyWrapper struct {
 	transport *HTTP1Transport
 	keepAlive bool
 	once      sync.Once
+	// stopWatch ends the request's context watchdog. It stays armed until the
+	// body is done, so a cancellation during the body read unblocks too.
+	stopWatch func()
+	ctx       context.Context
 }
 
 func (w *pooledBodyWrapper) Read(p []byte) (n int, err error) {
 	n, err = w.body.Read(p)
 	if err == io.EOF {
 		w.handleClose()
+		return n, err
+	}
+	if err != nil {
+		err = translateBodyError(w.ctx, err)
 	}
 	return n, err
 }
@@ -294,39 +476,61 @@ func (w *pooledBodyWrapper) Close() error {
 	if err != nil {
 		// Body drain failed (e.g., deadline hit on large response).
 		// Connection's bufio.Reader is mid-body — don't pool it.
-		w.once.Do(func() { w.conn.close() })
+		w.once.Do(func() {
+			w.stopWatching()
+			w.conn.close()
+		})
 		return err
 	}
 	w.handleClose()
 	return nil
 }
 
+func (w *pooledBodyWrapper) stopWatching() {
+	if w.stopWatch != nil {
+		w.stopWatch()
+	}
+}
+
 func (w *pooledBodyWrapper) handleClose() {
 	w.once.Do(func() {
+		w.stopWatching()
+		// A poisoned connection was interrupted mid-exchange by a cancelled
+		// context, so its reader sits at an unknown offset in the response —
+		// reusing it would corrupt the next request. Drop it instead.
+		if !w.keepAlive || w.conn.poisoned.Load() {
+			w.conn.close()
+			return
+		}
 		// Clear deadline before returning conn to pool — the next request
 		// will set its own deadline. Without this, the stale deadline from
 		// the previous request would fire during the next request's I/O.
 		w.conn.conn.SetDeadline(time.Time{})
-		if w.keepAlive {
-			w.transport.putIdleConn(w.key, w.conn)
-		} else {
-			w.conn.close()
-		}
+		w.transport.putIdleConn(w.key, w.conn)
 	})
 }
 
 // streamBodyWrapper wraps response body to close connection when body is closed
 type streamBodyWrapper struct {
-	body io.ReadCloser
-	conn *http1Conn
+	body      io.ReadCloser
+	conn      *http1Conn
+	stopWatch func()
+	ctx       context.Context
 }
 
 func (w *streamBodyWrapper) Read(p []byte) (n int, err error) {
-	return w.body.Read(p)
+	n, err = w.body.Read(p)
+	if err != nil && err != io.EOF {
+		err = translateBodyError(w.ctx, err)
+	}
+	return n, err
 }
 
 func (w *streamBodyWrapper) Close() error {
 	err := w.body.Close()
+	if w.stopWatch != nil {
+		w.stopWatch()
+	}
 	w.conn.close()
 	return err
 }
@@ -360,24 +564,47 @@ func (t *HTTP1Transport) StreamRoundTrip(req *http.Request) (*http.Response, err
 	}
 
 	// Create new connection (don't use pool for streaming)
-	conn, err := t.createConn(req.Context(), host, port, scheme)
+	conn, err := t.createConnRetry(req.Context(), host, port, scheme)
 	if err != nil {
 		return nil, err
 	}
 
+	stopWatch := watchContext(req.Context(), conn)
 	resp, err := t.doRequest(conn, req)
-	if err != nil {
+	if err != nil || req.Context().Err() != nil {
+		stopWatch()
 		conn.close()
+		if ctxErr := contextError(req.Context()); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, WrapError("stream_request", host, port, "h1", err)
 	}
 
 	// Wrap the response body to close connection when body is closed
 	resp.Body = &streamBodyWrapper{
-		body: resp.Body,
-		conn: conn,
+		body:      resp.Body,
+		conn:      conn,
+		stopWatch: stopWatch,
+		ctx:       req.Context(),
 	}
 
 	return resp, nil
+}
+
+// createConnRetry establishes a connection, retrying transient failures a
+// couple of times when a proxy is configured. Connection setup happens before
+// any request bytes are sent, so a retry here is safe for every HTTP method —
+// it cannot duplicate a non-idempotent request the way a response-level retry
+// could. With no proxy it is a single attempt (no added latency).
+func (t *HTTP1Transport) createConnRetry(ctx context.Context, host, port, scheme string) (*http1Conn, error) {
+	attempts := 1
+	if t.proxy != nil && t.proxy.URL != "" {
+		attempts = proxyDialAttempts
+	}
+	return retryDial(ctx, attempts, t.connectTimeout+10*time.Second,
+		func(c context.Context) (*http1Conn, error) {
+			return t.createConn(c, host, port, scheme)
+		})
 }
 
 // createConn creates a new HTTP/1.1 connection
@@ -435,26 +662,24 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 			}
 		}
 
-		// Try each IP address in order (preferred first based on PreferIPv4 setting)
-		var lastErr error
-		for _, ip := range ips {
-			network := "tcp4"
-			if ip.To4() == nil {
-				network = "tcp6"
-			}
-			addr := net.JoinHostPort(ip.String(), port)
-
-			rawConn, err = dialer.DialContext(ctx, network, addr)
-			if err == nil {
-				break // Connection successful
-			}
-			lastErr = err
+		// Race the resolved addresses with a staggered start (Happy Eyeballs):
+		// an unreachable address (e.g. a blackholed IPv6) no longer delays the
+		// next, and the fastest reachable one wins. Bounded by the dialer timeout
+		// + ctx; losing connections are closed.
+		rawConn, err = staggeredRace(ctx, len(ips), 250*time.Millisecond,
+			func(rctx context.Context, idx int) (net.Conn, error) {
+				network := "tcp4"
+				if ips[idx].To4() == nil {
+					network = "tcp6"
+				}
+				return dialer.DialContext(rctx, network, net.JoinHostPort(ips[idx].String(), port))
+			},
+			func(c net.Conn) { c.Close() },
+		)
+		if err != nil {
+			return nil, NewConnectionError("dial", host, port, "h1", err)
 		}
-
 		if rawConn == nil {
-			if lastErr != nil {
-				return nil, NewConnectionError("dial", host, port, "h1", lastErr)
-			}
 			return nil, NewConnectionError("dial", host, port, "h1", fmt.Errorf("all connection attempts failed"))
 		}
 	}
@@ -484,6 +709,21 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 			keyLogWriter = GetKeyLogWriter()
 		}
 
+		// Determine the effective JA3 source: a programmatic CustomJA3 takes
+		// priority, then the preset's own JA3 (set by JSON custom presets). H2
+		// already does this; H1 used to look at config.CustomJA3 only, so a
+		// JSON-registered JA3 preset fell through to an empty ClientHelloID and
+		// failed with "tls: unknown ClientHelloID: -".
+		effJA3 := ""
+		var effJA3Extras *fingerprint.JA3Extras
+		if t.config != nil && t.config.CustomJA3 != "" {
+			effJA3 = t.config.CustomJA3
+			effJA3Extras = t.config.CustomJA3Extras
+		} else if t.preset.JA3 != "" {
+			effJA3 = t.preset.JA3
+			effJA3Extras = t.preset.JA3Extras
+		}
+
 		tlsConfig := &utls.Config{
 			ServerName:                         host,
 			InsecureSkipVerify:                 t.insecureSkipVerify,
@@ -493,16 +733,17 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 			PreferSkipResumptionOnNilExtension: true,                 // Skip resumption if spec has no PSK extension
 			KeyLogWriter:                       keyLogWriter,
 		}
-		// Only set session cache when not using custom JA3 without PSK extension
-		if t.config == nil || t.config.CustomJA3 == "" || fingerprint.JA3HasExtension(t.config.CustomJA3, "41") {
+		t.tlsVerify.Apply(tlsConfig)
+		// Only set session cache when not using a JA3 without PSK extension
+		if effJA3 == "" || fingerprint.JA3HasExtension(effJA3, "41") {
 			tlsConfig.ClientSessionCache = t.sessionCache
 		}
 
 		// Create TLS connection with appropriate fingerprint
 		var tlsConn *utls.UConn
-		if t.config != nil && t.config.CustomJA3 != "" {
-			// Custom JA3: parse to spec and apply with HelloCustom
-			spec, parseErr := fingerprint.ParseJA3(t.config.CustomJA3, t.config.CustomJA3Extras)
+		if effJA3 != "" {
+			// JA3 (programmatic CustomJA3 or preset.JA3): parse to spec and apply with HelloCustom
+			spec, parseErr := fingerprint.ParseJA3(effJA3, effJA3Extras)
 			if parseErr != nil {
 				rawConn.Close()
 				return nil, NewTLSError("parse_ja3", host, port, "h1", parseErr)
@@ -539,10 +780,14 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 					break
 				}
 			}
+
+			// Apply the preset's TCP signature_algorithms override (e.g. Chrome 150
+			// ML-DSA) on the materialised extensions, same mechanism as the ALPN edit.
+			fingerprint.ApplySignatureAlgorithms(tlsConn.Extensions, t.preset.SignatureAlgorithms)
 		}
-		// Only set session cache for preset path or custom JA3 with PSK extension.
+		// Only set session cache for preset path or JA3 with PSK extension.
 		// Setting session cache on a spec without PSK extension can cause handshake failures.
-		if t.config == nil || t.config.CustomJA3 == "" || fingerprint.JA3HasExtension(t.config.CustomJA3, "41") {
+		if effJA3 == "" || fingerprint.JA3HasExtension(effJA3, "41") {
 			tlsConn.SetSessionCache(t.sessionCache)
 		}
 
@@ -560,8 +805,8 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 				}
 
 				// Redo TLS setup on the clean connection
-				if t.config != nil && t.config.CustomJA3 != "" {
-					spec, parseErr := fingerprint.ParseJA3(t.config.CustomJA3, t.config.CustomJA3Extras)
+				if effJA3 != "" {
+					spec, parseErr := fingerprint.ParseJA3(effJA3, effJA3Extras)
 					if parseErr != nil {
 						rawConn.Close()
 						return nil, NewTLSError("parse_ja3", host, port, "h1", parseErr)
@@ -590,8 +835,13 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 						}
 					}
 				}
-				// Only set session cache when not using custom JA3 without PSK extension
-				if t.config == nil || t.config.CustomJA3 == "" || fingerprint.JA3HasExtension(t.config.CustomJA3, "41") {
+				// Apply the preset's TCP signature_algorithms override on the
+				// speculative-fallback ClientHelloID path (JA3 carries its own).
+				if effJA3 == "" {
+					fingerprint.ApplySignatureAlgorithms(tlsConn.Extensions, t.preset.SignatureAlgorithms)
+				}
+				// Only set session cache when not using a JA3 without PSK extension
+				if effJA3 == "" || fingerprint.JA3HasExtension(effJA3, "41") {
 					tlsConn.SetSessionCache(t.sessionCache)
 				}
 				if hsErr := tlsConn.HandshakeContext(ctx); hsErr != nil {
@@ -608,6 +858,16 @@ func (t *HTTP1Transport) createConn(ctx context.Context, host, port, scheme stri
 
 		conn.tlsConn = tlsConn
 		conn.conn = tlsConn
+
+		// Validate the negotiated protocol. H1 offers only http/1.1; an empty
+		// result (server did no ALPN) is fine, but if a non-conformant server
+		// negotiated something else (e.g. h2) we must not write a plaintext
+		// HTTP/1.1 request onto an h2-expecting connection — surface a clear
+		// protocol error instead of an opaque parse failure downstream.
+		if np := tlsConn.ConnectionState().NegotiatedProtocol; np != "" && np != "http/1.1" {
+			tlsConn.Close()
+			return nil, NewTLSError("alpn", host, port, "h1", fmt.Errorf("server negotiated %q, expected http/1.1", np))
+		}
 	}
 
 	conn.br = bufio.NewReaderSize(conn.conn, 64*1024)  // 64KB read buffer
@@ -669,13 +929,13 @@ func (t *HTTP1Transport) dialThroughHTTPProxy(ctx context.Context, targetHost, t
 		}
 	}
 
-	// Pre-resolve proxy hostname using CGO-compatible resolver
-	// Required for shared library usage where Go's pure-Go resolver doesn't work
-	resolver := &net.Resolver{PreferGo: false}
-	proxyIPs, err := resolver.LookupHost(ctx, proxyHost)
+	// Resolve the proxy hostname via the shared DNS cache (cached, honors the
+	// configured IP-family preference, stale fallback on transient errors).
+	proxyIPObjs, err := t.dnsCache.ResolveAllSorted(ctx, proxyHost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve proxy host %s: %w", proxyHost, err)
 	}
+	proxyIPs := ipsToStrings(proxyIPObjs)
 	if len(proxyIPs) == 0 {
 		return nil, fmt.Errorf("no IP addresses found for proxy host %s", proxyHost)
 	}
@@ -690,9 +950,9 @@ func (t *HTTP1Transport) dialThroughHTTPProxy(ctx context.Context, targetHost, t
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(t.localAddr)}
 	}
 
-	// Dial using resolved IP to avoid DNS lookup in net.Dialer
-	proxyAddr := net.JoinHostPort(proxyIPs[0], proxyPort)
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+	// Dial using pre-resolved IPs (every address, IPv4 first) to avoid an
+	// in-dialer DNS lookup and to fall through unreachable addresses.
+	conn, err := dialProxyAddrs(ctx, dialer, proxyIPs, proxyPort, t.connectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 	}
@@ -738,11 +998,11 @@ func (t *HTTP1Transport) dialHTTPProxyBlockingFresh(ctx context.Context, targetH
 		}
 	}
 
-	resolver := &net.Resolver{PreferGo: false}
-	proxyIPs, err := resolver.LookupHost(ctx, proxyHost)
+	proxyIPObjs, err := t.dnsCache.ResolveAllSorted(ctx, proxyHost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve proxy host %s: %w", proxyHost, err)
 	}
+	proxyIPs := ipsToStrings(proxyIPObjs)
 	if len(proxyIPs) == 0 {
 		return nil, fmt.Errorf("no IP addresses found for proxy host %s", proxyHost)
 	}
@@ -757,8 +1017,7 @@ func (t *HTTP1Transport) dialHTTPProxyBlockingFresh(ctx context.Context, targetH
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(t.localAddr)}
 	}
 
-	proxyAddr := net.JoinHostPort(proxyIPs[0], proxyPort)
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+	conn, err := dialProxyAddrs(ctx, dialer, proxyIPs, proxyPort, t.connectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 	}
@@ -900,6 +1159,15 @@ func (t *HTTP1Transport) writeRequest(conn *http1Conn, req *http.Request) error 
 	}
 	fmt.Fprintf(conn.bw, "Host: %s\r\n", host)
 
+	// Connection header second, immediately after Host. Real Chrome emits
+	// "Connection: keep-alive" as the second request header on the HTTP/1.1 wire.
+	// Honor a caller-supplied value if present; otherwise default to keep-alive.
+	connValue := "keep-alive"
+	if v := req.Header.Get("Connection"); v != "" {
+		connValue = v
+	}
+	fmt.Fprintf(conn.bw, "Connection: %s\r\n", connValue)
+
 	// Determine if we need chunked encoding (unknown content length with body)
 	// http.NoBody is an explicit "no body" sentinel — don't use chunked for it
 	useChunked := req.Body != nil && req.Body != http.NoBody && req.ContentLength <= 0 && req.Header.Get("Content-Length") == ""
@@ -978,6 +1246,20 @@ func canonicalHeaderKey(s string) string {
 	return textproto.CanonicalMIMEHeaderKey(s)
 }
 
+// h1WireHeaderName returns the exact header-name casing real Chrome uses on the
+// HTTP/1.1 wire. Chrome lowercases the UA client-hint headers (sec-ch-ua and the
+// sec-ch-ua-* family) while keeping classic headers and Sec-Fetch-* Title-Cased.
+// Go's canonical form (Sec-Ch-Ua) diverges from Chrome's lowercase, so we map it
+// back here. The argument is the canonical map key; the value lookup still uses
+// the canonical key.
+func h1WireHeaderName(canonicalKey string) string {
+	lower := strings.ToLower(canonicalKey)
+	if strings.HasPrefix(lower, "sec-ch-") {
+		return lower
+	}
+	return canonicalKey
+}
+
 // writeHeadersInOrder writes headers in a browser-like order
 func (t *HTTP1Transport) writeHeadersInOrder(w *bufio.Writer, req *http.Request, useChunked bool) {
 	// Check if custom header order is specified (from preset or user)
@@ -991,6 +1273,13 @@ func (t *HTTP1Transport) writeHeadersInOrder(w *bufio.Writer, req *http.Request,
 		headerOrder = []string{
 			"Connection",
 			"Cache-Control",
+			// UA client-hint cluster (low + high entropy) in a fixed Chrome
+			// order. The session injects the high-entropy Sec-Ch-Ua-* set on
+			// Accept-CH; listing them here keeps them out of the random
+			// map-iteration remainder loop below so the wire order is stable.
+			"Sec-Ch-Ua", "Sec-Ch-Ua-Arch", "Sec-Ch-Ua-Bitness", "Sec-Ch-Ua-Full-Version-List",
+			"Sec-Ch-Ua-Mobile", "Sec-Ch-Ua-Model",
+			"Sec-Ch-Ua-Platform", "Sec-Ch-Ua-Platform-Version", "Sec-Ch-Ua-Wow64",
 			"Upgrade-Insecure-Requests",
 			"User-Agent",
 			"Accept",
@@ -1003,6 +1292,9 @@ func (t *HTTP1Transport) writeHeadersInOrder(w *bufio.Writer, req *http.Request,
 			"Sec-Fetch-Mode",
 			"Sec-Fetch-Site",
 			"Sec-Fetch-User",
+			// Conditional-cache validators in a fixed slot (ETag validator first),
+			// so the session-injected pair doesn't shuffle per request.
+			"If-None-Match", "If-Modified-Since",
 			"Content-Type",
 			"Content-Length",
 			"Transfer-Encoding",
@@ -1054,23 +1346,44 @@ func (t *HTTP1Transport) writeHeadersInOrder(w *bufio.Writer, req *http.Request,
 			continue
 		}
 
+		// Skip Connection - already written immediately after Host
+		if strings.EqualFold(key, "Connection") {
+			written[canonicalKey] = true
+			continue
+		}
+
 		// Look up header using canonical key
 		if values, ok := req.Header[canonicalKey]; ok {
 			for _, v := range values {
-				fmt.Fprintf(w, "%s: %s\r\n", canonicalKey, v)
+				fmt.Fprintf(w, "%s: %s\r\n", h1WireHeaderName(canonicalKey), v)
 			}
 			written[canonicalKey] = true
 		}
 	}
 
-	// Write remaining headers (not in specified order)
-	for key, values := range req.Header {
-		// Key from map iteration is already canonical
-		if written[key] {
-			continue
+	// Write remaining headers (not in specified order). Sorted rather than
+	// ranged over directly: Go randomises map iteration per range, so an
+	// unsorted remainder puts a different header order on the wire for every
+	// request, which is itself a fingerprint. applyPresetHeaders normally names
+	// every header up front and leaves this loop empty; the sort is what keeps
+	// the fallback stable when it does not.
+	remaining := make([]string, 0, len(req.Header))
+	for key := range req.Header {
+		if !written[key] {
+			remaining = append(remaining, key)
 		}
+	}
+	sort.Strings(remaining)
+
+	for _, key := range remaining {
+		// Key from map iteration is already canonical
+		values := req.Header[key]
 		// Skip Host (already written) and certain headers
 		if strings.EqualFold(key, "Host") {
+			continue
+		}
+		// Skip Connection - already written immediately after Host
+		if strings.EqualFold(key, "Connection") {
 			continue
 		}
 		// Skip internal header ordering keys - these are used internally to control
@@ -1083,7 +1396,7 @@ func (t *HTTP1Transport) writeHeadersInOrder(w *bufio.Writer, req *http.Request,
 			continue
 		}
 		for _, v := range values {
-			fmt.Fprintf(w, "%s: %s\r\n", key, v)
+			fmt.Fprintf(w, "%s: %s\r\n", h1WireHeaderName(key), v)
 		}
 		written[key] = true
 	}
@@ -1107,10 +1420,8 @@ func (t *HTTP1Transport) writeHeadersInOrder(w *bufio.Writer, req *http.Request,
 		fmt.Fprintf(w, "Transfer-Encoding: chunked\r\n")
 	}
 
-	// Ensure Connection header
-	if _, ok := req.Header["Connection"]; !ok {
-		fmt.Fprintf(w, "Connection: keep-alive\r\n")
-	}
+	// Connection is written immediately after Host in writeRequest (Chrome emits
+	// it as the second header), so it is intentionally not written here.
 }
 
 // shouldKeepAlive determines if connection should be reused

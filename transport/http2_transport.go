@@ -6,11 +6,13 @@ import (
 	crand "crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	http "github.com/sardanioss/http"
@@ -21,6 +23,7 @@ import (
 	"github.com/sardanioss/net/http2/hpack"
 	tls "github.com/sardanioss/utls"
 	utls "github.com/sardanioss/utls"
+	"golang.org/x/sync/singleflight"
 )
 
 // HTTP2Transport is a custom HTTP/2 transport with uTLS fingerprinting
@@ -35,6 +38,19 @@ type HTTP2Transport struct {
 	conns   map[string]*persistentConn
 	connsMu sync.RWMutex
 
+	// retired holds connections evicted from conns while a response body was
+	// still streaming on them. Their close is deferred until the body finishes,
+	// and without this list nothing would ever revisit them: cleanup() only
+	// walks conns, so an evicted connection whose body is never closed would
+	// keep its socket for the process lifetime and Close() could not reclaim it.
+	retired   []*persistentConn
+	retiredMu sync.Mutex
+
+	// dialGroup collapses concurrent dials for the same pool key into a single
+	// connection attempt, so a burst of requests to one host (especially behind
+	// a proxy) opens one connection instead of a storm of N.
+	dialGroup singleflight.Group
+
 	// TLS session resumption cache (shared across connections)
 	sessionCache utls.ClientSessionCache
 
@@ -48,11 +64,13 @@ type HTTP2Transport struct {
 	hasPSKSpec bool
 
 	// Configuration
-	maxIdleTime        time.Duration
-	maxConnAge         time.Duration
-	connectTimeout     time.Duration
-	insecureSkipVerify bool
-	localAddr          string // Local IP to bind outgoing connections
+	maxIdleTime          time.Duration
+	maxConnAge           time.Duration
+	abandonedBodyTimeout time.Duration
+	connectTimeout       time.Duration
+	insecureSkipVerify   bool
+	tlsVerify            *TLSVerify
+	localAddr            string // Local IP to bind outgoing connections
 
 	// Cleanup
 	stopCleanup chan struct{}
@@ -64,14 +82,139 @@ type persistentConn struct {
 	host            string
 	tlsConn         *utls.UConn
 	h2Conn          *http2.ClientConn
-	createdAt       time.Time
-	lastUsedAt      time.Time
-	useCount        int64
-	inFlight        int32 // number of active RoundTrip calls — prevents cleanup during long requests
-	sessionResumed  bool  // True if TLS session was resumed (faster handshake)
-	tlsVersion      uint16
-	cipherSuite     uint16
-	mu              sync.Mutex
+	createdAt      time.Time
+	lastUsedAt     time.Time
+	useCount       int64
+	inFlight       int32 // requests still using this conn, including their response bodies
+	closeRequested bool  // close as soon as the last in-flight request finishes
+	closed         bool  // close() has already run
+	sessionResumed bool  // True if TLS session was resumed (faster handshake)
+	tlsVersion     uint16
+	cipherSuite    uint16
+	mu             sync.Mutex
+
+	// lastProgress is the unix-nano timestamp of the most recent body read.
+	// Kept outside the mutex because it is touched on every Read. Only
+	// meaningful while inFlight > 0, where it distinguishes a slow-but-live
+	// download from a body the caller abandoned without closing.
+	lastProgress atomic.Int64
+}
+
+// release marks one request as finished with the connection. If a close was
+// deferred because requests were still streaming, it happens here.
+func (c *persistentConn) release() {
+	c.mu.Lock()
+	c.inFlight--
+	c.lastUsedAt = time.Now()
+	shouldClose := c.closeRequested && c.inFlight <= 0
+	c.mu.Unlock()
+
+	if shouldClose {
+		c.close()
+	}
+}
+
+// requestClose closes the connection now if nothing is using it, otherwise
+// defers the close until the last in-flight response body is done. Evicting a
+// connection from the pool must never yank the socket out from under a
+// response that is still streaming (issue #83).
+func (c *persistentConn) requestClose() {
+	c.mu.Lock()
+	if c.inFlight > 0 {
+		c.closeRequested = true
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+	c.close()
+}
+
+// retire evicts a connection that is no longer wanted in the pool.
+//
+// If nothing is using it the socket closes immediately. If a response body is
+// still streaming, the close is deferred until that body finishes AND the
+// connection is tracked in t.retired, so cleanup() can still apply the
+// abandoned-body bound to it and Close() can still reclaim it. Dropping an
+// evicted-but-draining connection on the floor - which is what a bare
+// requestClose() at an eviction site does - leaks the socket, its h2 ClientConn
+// and that connection's reader goroutine for the process lifetime whenever the
+// caller never closes the body.
+func (t *HTTP2Transport) retire(conn *persistentConn) {
+	conn.mu.Lock()
+	deferred := conn.inFlight > 0 && !conn.closed
+	if deferred {
+		conn.closeRequested = true
+	}
+	conn.mu.Unlock()
+
+	if !deferred {
+		conn.close()
+		return
+	}
+
+	t.retiredMu.Lock()
+	t.retired = append(t.retired, conn)
+	t.retiredMu.Unlock()
+}
+
+// sweepRetired closes evicted connections whose bodies have finished, and
+// applies the abandoned-body bound to those whose caller walked away.
+func (t *HTTP2Transport) sweepRetired() {
+	t.retiredMu.Lock()
+	defer t.retiredMu.Unlock()
+
+	kept := t.retired[:0]
+	for _, conn := range t.retired {
+		conn.mu.Lock()
+		done := conn.closed
+		conn.mu.Unlock()
+		if done {
+			continue // release() already fired the deferred close
+		}
+		if t.isConnDestroyable(conn) {
+			go conn.close()
+			continue
+		}
+		kept = append(kept, conn)
+	}
+	t.retired = kept
+}
+
+// connBodyGuard keeps a pooled connection marked in-use for as long as the
+// caller is reading the response body.
+//
+// HTTP/2 RoundTrip returns as soon as the response *headers* arrive, so without
+// this the connection looked idle the moment a download started. A transfer
+// lasting longer than maxIdleTime was then closed underneath the reader by the
+// pool cleanup, which is what issue #83 reported at roughly 120s (90s idle plus
+// the 30s cleanup tick).
+type connBodyGuard struct {
+	io.ReadCloser
+	conn *persistentConn
+	once sync.Once
+}
+
+func (g *connBodyGuard) Read(p []byte) (int, error) {
+	n, err := g.ReadCloser.Read(p)
+	if n > 0 {
+		g.conn.lastProgress.Store(time.Now().UnixNano())
+	}
+	if err != nil {
+		// io.EOF included: the transfer is over, stop holding the connection
+		// even if the caller forgets to Close.
+		g.release()
+	}
+	return n, err
+}
+
+func (g *connBodyGuard) Close() error {
+	err := g.ReadCloser.Close()
+	g.release()
+	return err
+}
+
+func (g *connBodyGuard) release() {
+	g.once.Do(g.conn.release)
 }
 
 // NewHTTP2Transport creates a new HTTP/2 transport with uTLS
@@ -124,10 +267,15 @@ func NewHTTP2TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		sessionCache:   sessionCache,
 		shuffleSeed:    shuffleSeed,
 		hasPSKSpec:     hasPSKSpec,
-		maxIdleTime:    90 * time.Second,
-		maxConnAge:     5 * time.Minute,
-		connectTimeout: 30 * time.Second,
-		stopCleanup:    make(chan struct{}),
+		maxIdleTime: 90 * time.Second,
+		maxConnAge:  5 * time.Minute,
+		// A response body that has not produced a single byte for this long is
+		// treated as abandoned by its caller, so the connection can be
+		// reclaimed. Without a bound here, a caller that never closes a body
+		// would pin the socket forever.
+		abandonedBodyTimeout: 10 * time.Minute,
+		connectTimeout:       30 * time.Second,
+		stopCleanup:          make(chan struct{}),
 	}
 
 	// Apply localAddr from config
@@ -174,9 +322,10 @@ func (t *HTTP2Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Make request
 	resp, err := conn.h2Conn.RoundTrip(req)
 	if err != nil {
-		conn.mu.Lock()
-		conn.inFlight--
-		conn.mu.Unlock()
+		// release(), not a bare decrement: if this conn was evicted while the
+		// request was in flight its close was deferred, and only release()
+		// fires it once the count reaches zero.
+		conn.release()
 
 		// Connection might be dead, remove it and retry once
 		t.removeConn(key)
@@ -197,20 +346,26 @@ func (t *HTTP2Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		resp, err = conn.h2Conn.RoundTrip(req)
 		if err != nil {
-			conn.mu.Lock()
-			conn.inFlight--
-			conn.mu.Unlock()
+			conn.release()
 			t.removeConn(key)
 			return nil, err
 		}
 	}
 
-	// Update last used time
+	// Keep the connection marked in-use until the caller finishes with the body.
+	// RoundTrip returning only means the headers arrived; the body may stream for
+	// minutes, and releasing here made the pool think the connection was idle.
 	conn.mu.Lock()
 	conn.lastUsedAt = time.Now()
-	conn.inFlight--
 	conn.useCount++
 	conn.mu.Unlock()
+	conn.lastProgress.Store(time.Now().UnixNano())
+
+	if resp.Body == nil {
+		conn.release()
+	} else {
+		resp.Body = &connBodyGuard{ReadCloser: resp.Body, conn: conn}
+	}
 
 	return resp, nil
 }
@@ -247,43 +402,110 @@ func (t *HTTP2Transport) getOrCreateConn(ctx context.Context, host, port, key st
 
 	// Close old unusable connection and remove from map
 	if exists {
-		go conn.close()
+		go t.retire(conn)
 		delete(t.conns, key)
 	}
 	t.connsMu.Unlock()
 
 	// Create new connection OUTSIDE lock — TCP+TLS dial can take seconds.
-	// This allows concurrent dials for different hosts to proceed in parallel.
-	newConn, err := t.createConn(ctx, host, port)
+	// Deduplicate concurrent dials for the same pool key via singleflight: without
+	// this, N simultaneous requests to a host with no usable connection each open
+	// their own TCP+TLS (and, behind an HTTP proxy, their own CONNECT) — a
+	// connection storm that wastes resources and trips proxy rate limits. The
+	// single winning dial's result is shared by every caller (H2 multiplexes all
+	// streams over one connection anyway). Dials for *different* keys still run in
+	// parallel.
+	// leader is set only inside the closure singleflight actually executes (the
+	// winner); coalesced waiters pass their own closures which never run, so their
+	// leader stays false. This lets a waiter recognise when it received the
+	// leader's result and react differently for connection-bearing errors.
+	leader := false
+	v, err, _ := t.dialGroup.Do(key, func() (interface{}, error) {
+		leader = true
+		// A usable conn may have been published between our checks above and
+		// winning the singleflight slot.
+		t.connsMu.RLock()
+		if c, ok := t.conns[key]; ok && t.isConnUsable(c) {
+			t.connsMu.RUnlock()
+			return c, nil
+		}
+		t.connsMu.RUnlock()
+
+		// Detach from the triggering request's cancellation so one caller going
+		// away doesn't abort the dial the others are waiting on — but PRESERVE
+		// that caller's deadline, otherwise a stalling host/proxy would ride
+		// past the configured timeout (context.WithoutCancel drops the deadline
+		// too). retryDial bounds each attempt by this deadline, so the whole
+		// dial (including retries) still aborts at the request budget.
+		dialParent := context.WithoutCancel(ctx)
+		if dl, ok := ctx.Deadline(); ok {
+			var dcancel context.CancelFunc
+			dialParent, dcancel = context.WithDeadline(dialParent, dl)
+			defer dcancel()
+		}
+		// When a proxy is configured, retry transient connection failures a
+		// couple of times (pre-send, so method-safe).
+		attempts := 1
+		if t.proxy != nil && t.proxy.URL != "" {
+			attempts = proxyDialAttempts
+		}
+		newConn, derr := retryDial(dialParent, attempts, t.connectTimeout+10*time.Second,
+			func(c context.Context) (*persistentConn, error) {
+				return t.createConn(c, host, port)
+			})
+		if derr != nil {
+			return nil, derr
+		}
+
+		t.connsMu.Lock()
+		if t.closed {
+			t.connsMu.Unlock()
+			go newConn.close()
+			return nil, fmt.Errorf("http2: transport closed")
+		}
+		// Another goroutine may have created a conn while we were dialing
+		if existingConn, ok := t.conns[key]; ok && t.isConnUsable(existingConn) {
+			t.connsMu.Unlock()
+			go newConn.close()
+			return existingConn, nil
+		}
+		t.conns[key] = newConn
+		t.connsMu.Unlock()
+		return newConn, nil
+	})
 	if err != nil {
+		// An ALPN downgrade returns a single live TLS connection carried inside
+		// the error, meant for ONE owner to serve over HTTP/1.1. singleflight
+		// hands every coalesced caller the same error (same connection), so only
+		// the leader may use it; waiters must dial their own connection instead
+		// of racing/double-closing the shared one. (Each waiter's own dial will
+		// itself downgrade and yield its own dedicated connection.)
+		var alpnErr *ALPNMismatchError
+		if errors.As(err, &alpnErr) && !leader {
+			return t.createConn(ctx, host, port)
+		}
 		return nil, err
 	}
-
-	// Store the new connection
-	t.connsMu.Lock()
-	if t.closed {
-		t.connsMu.Unlock()
-		go newConn.close()
-		return nil, fmt.Errorf("http2: transport closed")
-	}
-	// Another goroutine may have created a conn while we were dialing
-	if existingConn, ok := t.conns[key]; ok && t.isConnUsable(existingConn) {
-		t.connsMu.Unlock()
-		go newConn.close()
-		return existingConn, nil
-	}
-	t.conns[key] = newConn
-	t.connsMu.Unlock()
-
-	return newConn, nil
+	return v.(*persistentConn), nil
 }
 
-// isConnUsable checks if a connection is still usable
+// isConnUsable reports whether a connection may be handed out for a NEW request.
+//
+// This is deliberately separate from isConnDestroyable: "too old to start
+// another request on" and "safe to close" are different questions, and
+// conflating them is what let cleanup close connections that were still
+// streaming a response (issue #83).
+//
 // Note: We don't check CanTakeNewRequest() here because it can return false
 // even when the connection is fine. We'll handle errors during actual use.
 func (t *HTTP2Transport) isConnUsable(conn *persistentConn) bool {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
+
+	// Already evicted and waiting for its last body to finish.
+	if conn.closeRequested {
+		return false
+	}
 
 	// Check age
 	if time.Since(conn.createdAt) > t.maxConnAge {
@@ -304,8 +526,87 @@ func (t *HTTP2Transport) isConnUsable(conn *persistentConn) bool {
 	return true
 }
 
-// createConn creates a new persistent connection
+// isConnDestroyable reports whether a connection can be closed right now.
+//
+// A connection with requests still on it is never destroyable, however old or
+// idle-looking it is, with one exception: if its response body has made no
+// progress for abandonedBodyTimeout the caller has clearly walked away without
+// closing it, and holding the socket forever would be a leak.
+func (t *HTTP2Transport) isConnDestroyable(conn *persistentConn) bool {
+	conn.mu.Lock()
+	inFlight := conn.inFlight
+	lastUsedAt := conn.lastUsedAt
+	h2Conn := conn.h2Conn
+	conn.mu.Unlock()
+
+	if inFlight > 0 {
+		last := lastUsedAt
+		if p := conn.lastProgress.Load(); p > 0 {
+			if progressed := time.Unix(0, p); progressed.After(last) {
+				last = progressed
+			}
+		}
+		return time.Since(last) > t.abandonedBodyTimeout
+	}
+
+	if h2Conn == nil {
+		return true
+	}
+	if time.Since(conn.createdAt) > t.maxConnAge {
+		return true
+	}
+	return time.Since(lastUsedAt) > t.maxIdleTime
+}
+
+// createConn creates a new persistent H2 connection, degrading gracefully when
+// an applied ECH config is rejected. ECH is best-effort: if the first attempt
+// fails for an ECH/handshake-level reason (issue #74 — an ECHConfigDomain that
+// does not front this target, or a rotated/stale key), retry ONCE without ECH so
+// the connection still establishes (SNI visible) instead of failing H2 and
+// cascading to H1. An ALPNMismatchError is never retried here — it carries a live
+// TLS connection the caller reuses for H1.
 func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*persistentConn, error) {
+	// No ECH configured, or this host recently stalled/rejected ECH: dial once,
+	// skipping ECH when the host is known ECH-incompatible.
+	if !t.echConfigured() || dns.IsECHIncompatible(host) {
+		return t.establishConn(ctx, host, port, t.echConfigured() && dns.IsECHIncompatible(host))
+	}
+	// Time-box the ECH attempt so a target that STALLS on an incompatible ECH
+	// ClientHello (issue #74 — some servers stall rather than cleanly reject) fails
+	// fast, leaving budget to retry without ECH within the same request deadline.
+	echCtx, cancel := boundedECHAttempt(ctx)
+	conn, err := t.establishConn(echCtx, host, port, false)
+	cancel()
+	if err == nil {
+		return conn, nil
+	}
+	var alpnErr *ALPNMismatchError
+	if errors.As(err, &alpnErr) {
+		return conn, err // carries a live TLS conn for H1 reuse; never retry
+	}
+	if ctx.Err() != nil {
+		return conn, err // overall request budget exhausted, nothing to retry with
+	}
+	// The ECH attempt failed with budget to spare: a reject, a certificate
+	// mismatch, or a stall caught by the ECH sub-deadline (ctx is not done, so a
+	// DeadlineExceeded here is echCtx's). Remember the host as ECH-incompatible so
+	// future connections skip the stall, and retry now without ECH.
+	if echCausedDialFailure(err) || errors.Is(err, context.DeadlineExceeded) {
+		dns.MarkECHIncompatible(host)
+		return t.establishConn(ctx, host, port, true)
+	}
+	return conn, err
+}
+
+// echConfigured reports whether this transport has any ECH source configured
+// (raw bytes or an ECHConfigDomain), i.e. whether a no-ECH retry is meaningful.
+func (t *HTTP2Transport) echConfigured() bool {
+	return t.config != nil && (len(t.config.ECHConfig) > 0 || t.config.ECHConfigDomain != "")
+}
+
+// establishConn creates a new persistent connection. skipECH forces a no-ECH
+// handshake (see createConn's graceful-degradation retry).
+func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, skipECH bool) (*persistentConn, error) {
 	var rawConn net.Conn
 	var err error
 
@@ -360,36 +661,23 @@ func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*pe
 			}
 		}
 
-		// Try each IP address with per-address timeout budget to avoid
-		// spending the full connectTimeout on each unreachable address.
-		var lastErr error
-		remaining := len(ips)
-		for _, ip := range ips {
-			network := "tcp4"
-			if ip.To4() == nil {
-				network = "tcp6"
-			}
-			addr := net.JoinHostPort(ip.String(), port)
-
-			// Budget: split remaining time evenly, capped at 10s per address
-			perAddr := t.connectTimeout / time.Duration(remaining)
-			if perAddr > 10*time.Second {
-				perAddr = 10 * time.Second
-			}
-			dialCtx, dialCancel := context.WithTimeout(ctx, perAddr)
-			rawConn, err = dialer.DialContext(dialCtx, network, addr)
-			dialCancel()
-			if err == nil {
-				break // Connection successful
-			}
-			lastErr = err
-			remaining--
+		// Race the resolved addresses with a staggered start (Happy Eyeballs):
+		// an unreachable address no longer delays the next, and the fastest
+		// reachable one wins. Bounded by the dialer timeout + ctx; losers closed.
+		rawConn, err = staggeredRace(ctx, len(ips), 250*time.Millisecond,
+			func(rctx context.Context, idx int) (net.Conn, error) {
+				network := "tcp4"
+				if ips[idx].To4() == nil {
+					network = "tcp6"
+				}
+				return dialer.DialContext(rctx, network, net.JoinHostPort(ips[idx].String(), port))
+			},
+			func(c net.Conn) { c.Close() },
+		)
+		if err != nil {
+			return nil, fmt.Errorf("TCP connect failed: %w", err)
 		}
-
 		if rawConn == nil {
-			if lastErr != nil {
-				return nil, fmt.Errorf("TCP connect failed: %w", lastErr)
-			}
 			return nil, fmt.Errorf("TCP connect failed: all connection attempts failed")
 		}
 	}
@@ -434,10 +722,18 @@ func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*pe
 			specToUse = &spec
 		}
 	}
+	// Apply the preset's TCP signature_algorithms override (e.g. Chrome 150's
+	// ML-DSA codepoints) on top of the ClientHelloID base. The JA3 path carries its
+	// own sig-algs via JA3Extras, so it is skipped here.
+	if ja3String == "" && specToUse != nil {
+		fingerprint.ApplySignatureAlgorithms(specToUse.Extensions, t.preset.SignatureAlgorithms)
+	}
 
-	// Fetch ECH config if needed
+	// Fetch ECH config if needed. skipECH forces a no-ECH handshake, used by the
+	// graceful-degradation retry (issue #74) after a first attempt whose ECH
+	// config was rejected or mis-served.
 	var echConfigList []byte
-	if t.config != nil {
+	if !skipECH && t.config != nil {
 		if len(t.config.ECHConfig) > 0 {
 			echConfigList = t.config.ECHConfig
 		} else if t.config.ECHConfigDomain != "" {
@@ -473,6 +769,7 @@ func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*pe
 		EncryptedClientHelloConfigList:     echConfigList, // ECH configuration (if available)
 		KeyLogWriter:                       keyLogWriter,
 	}
+	t.tlsVerify.Apply(tlsConfig)
 
 	// Only enable session cache if we have PSK spec - prevents panic when session
 	// is cached but spec doesn't have PSK extension (TOCTOU race mitigation)
@@ -545,6 +842,10 @@ func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*pe
 				if spec, specErr := utls.UTLSIdToSpecWithSeed(t.preset.ClientHelloID, t.shuffleSeed); specErr == nil {
 					fallbackSpec = &spec
 				}
+			}
+			// Keep the same TCP signature_algorithms override on the fallback spec.
+			if fallbackJA3 == "" && fallbackSpec != nil {
+				fingerprint.ApplySignatureAlgorithms(fallbackSpec.Extensions, t.preset.SignatureAlgorithms)
 			}
 
 			// Redo TLS handshake on the clean connection
@@ -797,13 +1098,13 @@ func (t *HTTP2Transport) dialThroughHTTPProxy(ctx context.Context, targetHost, t
 		}
 	}
 
-	// Pre-resolve proxy hostname using CGO-compatible resolver
-	// Required for shared library usage where Go's pure-Go resolver doesn't work
-	resolver := &net.Resolver{PreferGo: false}
-	proxyIPs, err := resolver.LookupHost(ctx, proxyHost)
+	// Resolve the proxy hostname via the shared DNS cache (cached, honors the
+	// configured IP-family preference, stale fallback on transient errors).
+	proxyIPObjs, err := t.dnsCache.ResolveAllSorted(ctx, proxyHost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve proxy host %s: %w", proxyHost, err)
 	}
+	proxyIPs := ipsToStrings(proxyIPObjs)
 	if len(proxyIPs) == 0 {
 		return nil, fmt.Errorf("no IP addresses found for proxy host %s", proxyHost)
 	}
@@ -819,8 +1120,7 @@ func (t *HTTP2Transport) dialThroughHTTPProxy(ctx context.Context, targetHost, t
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(t.localAddr)}
 	}
 
-	proxyAddr := net.JoinHostPort(proxyIPs[0], proxyPort)
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+	conn, err := dialProxyAddrs(ctx, dialer, proxyIPs, proxyPort, t.connectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 	}
@@ -866,11 +1166,11 @@ func (t *HTTP2Transport) dialHTTPProxyBlockingFresh(ctx context.Context, targetH
 		}
 	}
 
-	resolver := &net.Resolver{PreferGo: false}
-	proxyIPs, err := resolver.LookupHost(ctx, proxyHost)
+	proxyIPObjs, err := t.dnsCache.ResolveAllSorted(ctx, proxyHost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve proxy host %s: %w", proxyHost, err)
 	}
+	proxyIPs := ipsToStrings(proxyIPObjs)
 	if len(proxyIPs) == 0 {
 		return nil, fmt.Errorf("no IP addresses found for proxy host %s", proxyHost)
 	}
@@ -885,8 +1185,7 @@ func (t *HTTP2Transport) dialHTTPProxyBlockingFresh(ctx context.Context, targetH
 		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(t.localAddr)}
 	}
 
-	proxyAddr := net.JoinHostPort(proxyIPs[0], proxyPort)
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+	conn, err := dialProxyAddrs(ctx, dialer, proxyIPs, proxyPort, t.connectTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 	}
@@ -976,7 +1275,9 @@ func (t *HTTP2Transport) removeConn(key string) {
 	t.connsMu.Unlock()
 
 	if exists && conn != nil {
-		go conn.close()
+		// Deferred: another request may still be streaming on this connection
+		// even though the caller that triggered the removal hit an error.
+		go t.retire(conn)
 	}
 }
 
@@ -986,6 +1287,7 @@ func (c *persistentConn) close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.closed = true
 	if c.h2Conn != nil {
 		c.h2Conn.Close()
 	}
@@ -1015,11 +1317,17 @@ func (t *HTTP2Transport) cleanup() {
 	defer t.connsMu.Unlock()
 
 	for key, conn := range t.conns {
-		if !t.isConnUsable(conn) {
+		// Note: destroyable, not "not usable". A connection that is merely too
+		// old to take new requests may still be streaming a response body.
+		if t.isConnDestroyable(conn) {
 			delete(t.conns, key)
 			go conn.close()
 		}
 	}
+
+	// Evicted-but-draining connections live outside t.conns; they need the same
+	// bound applied or they would never be revisited.
+	t.sweepRetired()
 }
 
 // Close shuts down the transport
@@ -1038,6 +1346,16 @@ func (t *HTTP2Transport) Close() {
 		go conn.close()
 	}
 	t.conns = nil
+
+	// Connections evicted while still streaming are not in t.conns. Shutdown is
+	// unconditional, so close them here too rather than leaving their sockets
+	// behind after the transport is gone.
+	t.retiredMu.Lock()
+	for _, conn := range t.retired {
+		go conn.close()
+	}
+	t.retired = nil
+	t.retiredMu.Unlock()
 }
 
 // Refresh closes all connections but keeps the TLS session cache intact.
@@ -1069,6 +1387,12 @@ func (t *HTTP2Transport) SetSessionCache(cache utls.ClientSessionCache) {
 }
 
 // SetInsecureSkipVerify sets whether to skip TLS certificate verification
+// SetTLSVerify installs caller-supplied certificate verification hooks.
+// Only verification is configurable; nothing here affects the ClientHello.
+func (t *HTTP2Transport) SetTLSVerify(v *TLSVerify) {
+	t.tlsVerify = v
+}
+
 func (t *HTTP2Transport) SetInsecureSkipVerify(skip bool) {
 	t.insecureSkipVerify = skip
 }
@@ -1235,9 +1559,10 @@ func (t *HTTP2Transport) Connect(ctx context.Context, host, port string) error {
 	}
 	// Check again in case another goroutine created one
 	if oldConn, exists := t.conns[key]; exists {
-		// Close the old one if not usable
+		// Close the old one if not usable. Deferred, because "not usable for a
+		// new request" does not mean nothing is streaming on it.
 		if !t.isConnUsable(oldConn) {
-			go oldConn.close()
+			go t.retire(oldConn)
 		} else {
 			// Old one is still good, close the new one we just created
 			go conn.close()

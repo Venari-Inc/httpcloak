@@ -75,6 +75,9 @@ Pin or disable specific HTTP versions.
 | Signature | Default | What it does |
 |---|---|---|
 | `WithInsecureSkipVerify() SessionOption` | verify enabled | Skips TLS certificate verification. Test-only, never ship this enabled. |
+| `WithVerifyPeerCertificate(fn func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error) SessionOption` | none | Mirrors `crypto/tls.Config.VerifyPeerCertificate`. Runs after the normal certificate checks with the raw certificates and any chains that were built; returning an error aborts the handshake. This is the hook for certificate pinning. Pair with `WithInsecureSkipVerify()` to replace the default verification rather than add to it. |
+| `WithVerifyConnection(fn func(cs tls.ConnectionState) error) SessionOption` | none | Mirrors `crypto/tls.Config.VerifyConnection`. Runs after `WithVerifyPeerCertificate`, on every handshake including resumptions. The state is the standard library type. |
+| `WithTLSConfig(cfg *tls.Config) SessionOption` | none | Convenience wrapper that reads the verification settings from a standard `*tls.Config`. Honoured: `VerifyPeerCertificate`, `VerifyConnection`, `RootCAs`, `InsecureSkipVerify`. **Ignored:** everything that shapes the ClientHello, including `CipherSuites`, `MinVersion`, `MaxVersion`, `CurvePreferences`, `NextProtos` and `ServerName`. Those come from the profile, and honouring them would silently change how the client looks on the wire. Prefer the two options above, which make the supported surface obvious. |
 | `WithDisableECH() SessionOption` | ECH attempted when DNS has it | Skips the ECH (Encrypted Client Hello) HTTPS RR lookup. Saves ~15-20ms on first connect at the cost of the privacy bump ECH gives you. |
 | `WithECHFrom(domain string) SessionOption` | target domain | Pulls ECH config from a different domain's DNS than the request target. Common pattern for Cloudflare: `WithECHFrom("cloudflare-ech.com")` works for any CF-fronted host. |
 | `WithSessionCache(backend, errCb) SessionOption` | in-memory | Plugs a distributed TLS session cache (e.g. Redis). `backend` implements `transport.SessionCacheBackend`; `errCb` is called when the backend fails. Lets multiple processes share TLS resumption tickets. |
@@ -104,6 +107,73 @@ Pin or disable specific HTTP versions.
 | `WithRedirects(follow bool, maxRedirects int) SessionOption` | follow=true, max=10 | Toggle follow + cap the chain. `maxRedirects=0` with `follow=true` falls back to the package default. |
 
 Runtime toggles (no ctor option required) live on `*Session`: `SetFollowRedirects(bool)` / `FollowRedirects()`, `SetMaxRedirects(int)` / `MaxRedirects()`. Per-request override: set `Request.FollowRedirects *bool` before `Do`. See [Conditional Cache](/connection-lifecycle/conditional-cache) for the parallel surface on ETag handling.
+
+#### Stopping a chain on one specific hop
+
+`Request.OnRedirect` is called once per hop, before the follow-up request is
+built. It is the alternative to turning redirects off and re-implementing the
+chain yourself — you keep the method rewrite, the `Referer` policy, the cookie
+jar and the credential scrubbing, and still get to say no.
+
+```go
+resp, err := s.Do(ctx, &httpcloak.Request{
+    Method: "POST", URL: checkout, Body: strings.NewReader(payload),
+    OnRedirect: func(r *httpcloak.Redirect) error {
+        if r.CrossOrigin {
+            return httpcloak.ErrUseLastResponse // stop, hand me the 3xx
+        }
+        return nil // follow it
+    },
+})
+```
+
+| Return | Result |
+|---|---|
+| `nil` | The hop is followed. |
+| `ErrUseLastResponse` | The chain stops. The 3xx becomes the response, with a nil error, exactly as if redirects had been off for that hop. |
+| any other error | The request fails with that error, unwrapped, so `errors.Is` against your own sentinel matches. |
+
+The `*Redirect` carries `Hop` (1-based), `StatusCode`, `Headers` (the 3xx's own —
+the only place to read a `Set-Cookie` or routing header the final response will
+not carry), `From`, `To`, `ToURL()`, `Method` (what the next hop will use, after
+the 301/302/303 rewrite to GET), `CrossOrigin` and `SchemeDowngrade`. Prefer the
+origin flags and `ToURL()` over substring-matching `To`:
+`strings.Contains(To, "example.com")` also passes for
+`https://example.com.attacker.test`.
+
+Read those headers with `GetHeader(name)` / `GetHeaders(name)`, which are
+case-insensitive. The raw `Headers` map is lowercase-keyed like every header map
+in the library, so `Headers["Set-Cookie"]` finds nothing while
+`Headers["set-cookie"]` works. Use the plural form for `Set-Cookie`, which can
+appear more than once:
+
+```go
+for _, c := range r.GetHeaders("Set-Cookie") {
+    // ...
+}
+```
+
+It is read-only. Writing to a field does not retarget the hop — a callback able
+to rewrite the target would run before the origin scrubbing, which is what stops
+`Authorization` following a redirect off-origin. It is not called for a 3xx with
+no `Location` (no hop to veto), nor for the hop that would exceed the cap (that
+fails with `ErrTooManyRedirects`), and never from `DoStream`, which does not
+follow redirects at all.
+
+#### Bodies on 307 and 308
+
+Those two codes keep the method and the body, so the body has to be sent twice.
+For `*bytes.Reader`, `*bytes.Buffer` and `*strings.Reader` this is automatic. For
+a genuine stream — an `*os.File`, a pipe — set `Request.GetBody` to re-open it:
+
+```go
+Body:    f,
+GetBody: func() (io.Reader, error) { return os.Open(path) },
+```
+
+Without it the hop fails with `ErrBodyNotReplayable` rather than being sent with
+an empty body, and the 3xx comes back alongside the error so you can read its
+`Location` and drive the rest of the chain yourself.
 
 ### Custom fingerprint struct (`CustomFingerprint`)
 
@@ -147,7 +217,7 @@ Methods on `*Session` itself, called after `NewSession` returns. These aren't `S
 | `GetProxy() string` | Current unified or TCP proxy URL. |
 | `GetTCPProxy() string` | Current TCP proxy URL. |
 | `GetUDPProxy() string` | Current UDP proxy URL. |
-| `SetHeaderOrder(order []string)` | Override the preset's header order. Lowercase names. `nil` resets to preset default. |
+| `SetHeaderOrder(order []string)` | Override the preset's header order. Lowercase names. Treated as a prefix: named headers lead, the preset's table covers the rest, anything left over is sorted. `nil` resets to preset default. |
 | `GetHeaderOrder() []string` | Current header order, or preset default if no override. |
 | `SetSessionIdentifier(id string)` | TLS-cache key namespace. Used when a session is registered with `LocalProxy` so distributed caches isolate per-session tickets. |
 | `Warmup(ctx, url) error` | Simulates a real browser page load: fetches HTML + CSS/JS/image subresources with realistic headers, priorities, and timing. Warms TLS, cookies, ticket cache. |
@@ -174,6 +244,8 @@ Package-level loaders, not methods on `*Session`:
 |---|---|
 | `LoadSession(path string) (*Session, error)` | Restore a session saved with `Save`. |
 | `UnmarshalSession(data []byte) (*Session, error)` | Restore a session from bytes saved with `Marshal`. |
+| `LoadSessionWithOptions(path string, opts *SessionLoadOptions)` | Same as `LoadSession`, plus the certificate verification hooks the file could not carry. Required when the saved session had any, otherwise the load fails. |
+| `UnmarshalSessionWithOptions(data []byte, opts *SessionLoadOptions)` | The in-memory form of the same. |
 | `Presets() []string` | The built-in preset names. Custom presets registered via `fingerprint.Register(name, *Preset)` go into a separate map and are NOT returned by `Presets()`. To resolve a name (built-in or custom) at runtime, use `fingerprint.Get(name)`. |
 
 ---

@@ -44,13 +44,18 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	http "github.com/sardanioss/http"
 	"io"
 	"math"
 	"math/rand"
 	"net"
-	http "github.com/sardanioss/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -70,13 +75,18 @@ import (
 // Client is an HTTP client with connection pooling and fingerprint spoofing
 // By default, it tries HTTP/3 first, then HTTP/2, then HTTP/1.1 as fallback
 type Client struct {
-	poolManager      *pool.Manager
-	quicManager      *pool.QUICManager
-	masqueTransport  *transport.HTTP3Transport // MASQUE proxy transport (if using MASQUE)
+	poolManager       *pool.Manager
+	quicManager       *pool.QUICManager
+	// h3Mu guards quicManager, masqueTransport and socks5H3Transport. The proxy
+	// setters close and replace all three, and a request in flight re-reads them
+	// after its own nil check has already passed, so an unguarded swap is a nil
+	// dereference. In the cgo bindings a Go panic takes the host process with it.
+	h3Mu sync.RWMutex
+	masqueTransport   *transport.HTTP3Transport // MASQUE proxy transport (if using MASQUE)
 	socks5H3Transport *transport.HTTP3Transport // SOCKS5 UDP relay transport for HTTP/3
-	h1Transport      *transport.HTTP1Transport
-	preset           *fingerprint.Preset
-	config           *ClientConfig
+	h1Transport       *transport.HTTP1Transport
+	preset            *fingerprint.Preset
+	config            *ClientConfig
 
 	// Authentication
 	auth Auth
@@ -209,6 +219,47 @@ func NewClient(presetName string, opts ...Option) *Client {
 		socks5H3Transport.SetInsecureSkipVerify(config.InsecureSkipVerify)
 	}
 
+	// Install caller-supplied TLS verification hooks (issue #85). Previously
+	// WithTLSConfig stored the config and nothing ever read it, so the callbacks
+	// silently never fired.
+	// ClientConfig.TLSConfig is exported, and Option is a plain func(*ClientConfig),
+	// so setting the field directly is a legal and documented-looking way to
+	// configure verification. Read it here as well as in WithTLSConfig, or that
+	// route silently applies nothing.
+	if config.TLSConfig != nil {
+		if config.VerifyPeerCertificate == nil {
+			config.VerifyPeerCertificate = config.TLSConfig.VerifyPeerCertificate
+		}
+		if config.VerifyConnection == nil {
+			config.VerifyConnection = config.TLSConfig.VerifyConnection
+		}
+		if config.RootCAs == nil {
+			config.RootCAs = config.TLSConfig.RootCAs
+		}
+		if config.TLSConfig.InsecureSkipVerify {
+			config.InsecureSkipVerify = true
+		}
+	}
+
+	if config.VerifyPeerCertificate != nil || config.VerifyConnection != nil || config.RootCAs != nil {
+		tlsVerify := &transport.TLSVerify{
+			VerifyPeerCertificate: config.VerifyPeerCertificate,
+			VerifyConnection:      config.VerifyConnection,
+			RootCAs:               config.RootCAs,
+		}
+		h2Manager.SetTLSVerify(tlsVerify)
+		h1Transport.SetTLSVerify(tlsVerify)
+		if quicManager != nil {
+			quicManager.SetTLSVerify(tlsVerify)
+		}
+		if masqueTransport != nil {
+			masqueTransport.SetTLSVerify(tlsVerify)
+		}
+		if socks5H3Transport != nil {
+			socks5H3Transport.SetTLSVerify(tlsVerify)
+		}
+	}
+
 	// Propagate ConnectTo mappings (domain fronting)
 	for requestHost, connectHost := range config.ConnectTo {
 		h2Manager.SetConnectTo(requestHost, connectHost)
@@ -274,9 +325,38 @@ func NewSession(presetName string, opts ...Option) *Client {
 }
 
 // SetPreset changes the fingerprint preset
+// SetPreset changes the browser profile for subsequent requests.
+//
+// This has to reach EVERY protocol. It used to update only the HTTP/2 pool
+// manager, so the HTTP/1.1 transport and all three HTTP/3 transports kept the
+// profile they were constructed with: the same client then presented one
+// browser over HTTP/2 and a different one over HTTP/1.1 or HTTP/3, depending
+// purely on which protocol a request happened to negotiate. For a library whose
+// entire job is presenting one coherent identity, that is the worst kind of
+// bug, because nothing surfaces it.
 func (c *Client) SetPreset(presetName string) {
-	c.preset = fingerprint.Get(presetName)
-	c.poolManager.SetPreset(c.preset)
+	preset := fingerprint.Get(presetName)
+	if preset == nil {
+		return
+	}
+	c.preset = preset
+	c.poolManager.SetPreset(preset)
+
+	if c.h1Transport != nil {
+		c.h1Transport.SetPreset(preset)
+	}
+
+	c.h3Mu.Lock()
+	if c.quicManager != nil {
+		c.quicManager.SetPreset(preset)
+	}
+	if c.masqueTransport != nil {
+		c.masqueTransport.SetPreset(preset)
+	}
+	if c.socks5H3Transport != nil {
+		c.socks5H3Transport.SetPreset(preset)
+	}
+	c.h3Mu.Unlock()
 }
 
 // SetTimeout sets the request timeout
@@ -435,6 +515,47 @@ type Request struct {
 
 	// Per-request retry override (nil = use client config)
 	DisableRetry bool
+
+	// IncludeTLSInfo populates Response.TLS with the leaf certificate's
+	// details. Off by default: parsing cert fields on every request isn't
+	// free, so opt in per-request rather than paying for it unconditionally.
+	IncludeTLSInfo bool
+
+	// HeaderOrder, when non-empty, sets the header order for this single request
+	// and overrides whatever SetHeaderOrder installed on the client. Nothing is
+	// stored on the client and no lock is taken, so concurrent requests can each
+	// carry a different order.
+	//
+	// The list is a prefix, not a whole-request replacement: headers you name are
+	// emitted first, in this order, and everything you leave out keeps the
+	// preset's own position (then a stable alphabetical tail). Name every header
+	// you send and you get exactly that wire order. Names are case-insensitive.
+	// Empty or nil means the client-wide order applies.
+	//
+	// The order carries across followed redirects, alongside the headers it
+	// orders and the other per-request options the redirect path already carries.
+	HeaderOrder []string
+
+	// OnRedirect, when non-nil, is called once per redirect hop before the
+	// follow-up request is built. Returning nil follows the hop; returning
+	// ErrUseLastResponse stops the chain and returns the 3xx itself with a nil
+	// error; any other error fails the request with that error unwrapped, so
+	// errors.Is against your own sentinel matches.
+	//
+	// This exists because both alternatives lose something. Turning redirects
+	// off hands you the entire chain to re-implement, cookie jar and header
+	// scrubbing included. Reading Response.RedirectHistory afterwards is too
+	// late: the request to the host you meant to block has already gone out.
+	//
+	// The hop is deliberately read-only. A callback able to rewrite the target
+	// would sit upstream of the scheme and origin scrubbing, which is the part
+	// that keeps Authorization from following a hop off-origin.
+	//
+	// Not called for a 3xx with no Location, nor for the hop that would exceed
+	// the redirect cap. An error from it is not retried, even with retries
+	// enabled: a request the caller already vetoed should not be replayed, and
+	// replaying it would re-invoke the callback once per attempt.
+	OnRedirect func(*Redirect) error
 }
 
 // SetHeader sets a header value, replacing any existing values.
@@ -496,9 +617,56 @@ type Response struct {
 	// Redirect history
 	RedirectHistory []*RedirectInfo
 
+	// TLS is the negotiated TLS connection's leaf-certificate info. Only
+	// populated when Request.IncludeTLSInfo is true.
+	TLS *TLSInfo
+
 	// bodyBytes caches the body after reading
 	bodyBytes []byte
 	bodyRead  bool
+}
+
+// TLSInfo describes the leaf certificate and negotiated parameters of a
+// response's TLS connection.
+type TLSInfo struct {
+	Version            string
+	CipherSuite        string
+	NegotiatedProtocol string
+	SubjectCN          string
+	Issuer             string
+	DNSNames           []string
+	NotBefore          time.Time
+	NotAfter           time.Time
+	SelfSigned         bool
+	SHA256Fingerprint  string
+}
+
+// buildTLSInfo extracts TLSInfo from the leaf certificate of a connection.
+// Takes primitives rather than a *tls.ConnectionState because the forked
+// http package's Response.TLS is actually *utls.ConnectionState (the
+// forked http aliases "tls" to github.com/sardanioss/utls) -- matching
+// certpin.go's own approach of never depending on that concrete type,
+// only on the standard x509 certificates it carries.
+// Returns nil if there are no peer certificates.
+func buildTLSInfo(version, cipherSuite uint16, negotiatedProtocol string, peerCertificates []*x509.Certificate) *TLSInfo {
+	if len(peerCertificates) == 0 {
+		return nil
+	}
+	leaf := peerCertificates[0]
+	fingerprint := sha256.Sum256(leaf.Raw)
+
+	return &TLSInfo{
+		Version:            tls.VersionName(version),
+		CipherSuite:        tls.CipherSuiteName(cipherSuite),
+		NegotiatedProtocol: negotiatedProtocol,
+		SubjectCN:          leaf.Subject.CommonName,
+		Issuer:             leaf.Issuer.CommonName,
+		DNSNames:           leaf.DNSNames,
+		NotBefore:          leaf.NotBefore,
+		NotAfter:           leaf.NotAfter,
+		SelfSigned:         bytes.Equal(leaf.RawIssuer, leaf.RawSubject),
+		SHA256Fingerprint:  hex.EncodeToString(fingerprint[:]),
+	}
 }
 
 // Close closes the response body.
@@ -567,6 +735,64 @@ func (r *Response) GetHeaders(key string) []string {
 	return r.Headers[strings.ToLower(key)]
 }
 
+// ErrNoLocation is returned by Response.Location when the response has no
+// Location header.
+//
+// Deliberately the same error value as transport.ErrNoLocation rather than a
+// separate sentinel with the same text: a caller doing
+// errors.Is(err, ErrNoLocation) must match regardless of which layer produced
+// the response.
+var ErrNoLocation = transport.ErrNoLocation
+
+// Redirect describes one hop a redirect chain is about to take. See
+// Request.OnRedirect.
+//
+// An alias rather than a copy of transport.Redirect: OnRedirect is a func value
+// travelling inward through the layers, so an alias makes
+// func(*client.Redirect) error and func(*transport.Redirect) error the identical
+// type and the field assigns straight through with no per-hop conversion.
+type Redirect = transport.Redirect
+
+// ErrUseLastResponse, returned from a Request.OnRedirect callback, stops the
+// redirect chain and returns the 3xx itself with a nil error.
+//
+// Deliberately the same error value as transport.ErrUseLastResponse, for the
+// same reason as ErrNoLocation above.
+var ErrUseLastResponse = transport.ErrUseLastResponse
+
+// ErrTooManyRedirects is returned when a chain exceeds the configured cap.
+//
+// Note the asymmetry with the session layer, which returns the last response
+// alongside this error: by the time doOnce knows the cap is blown it has not
+// built its Response yet, and restructuring it to do so is a larger change than
+// the sentinel is worth. Here the error arrives alone.
+var ErrTooManyRedirects = transport.ErrTooManyRedirects
+
+// redirectHookError marks an error as originating in Request.OnRedirect rather
+// than in the network, so doWithRetry stops instead of replaying a request the
+// caller already vetoed — and re-invoking their callback once per attempt.
+type redirectHookError struct{ err error }
+
+func (e *redirectHookError) Error() string { return e.err.Error() }
+func (e *redirectHookError) Unwrap() error { return e.err }
+
+// Location returns the URL of the response's "Location" header, if present.
+// A relative Location is resolved against the URL of the request that produced
+// the response (FinalURL), mirroring net/http's Response.Location.
+// ErrNoLocation is returned when no Location header is present.
+func (r *Response) Location() (*url.URL, error) {
+	lv := r.GetHeader("Location")
+	if lv == "" {
+		return nil, ErrNoLocation
+	}
+	if r.FinalURL != "" {
+		if base, err := url.Parse(r.FinalURL); err == nil {
+			return base.Parse(lv)
+		}
+	}
+	return url.Parse(lv)
+}
+
 // IsSuccess returns true if the status code is 2xx
 func (r *Response) IsSuccess() bool {
 	return r.StatusCode >= 200 && r.StatusCode < 300
@@ -594,7 +820,15 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	if c.config.RetryEnabled && !req.DisableRetry {
 		return c.doWithRetry(ctx, req)
 	}
-	return c.doOnce(ctx, req, nil)
+	resp, err := c.doOnce(ctx, req, nil)
+	// doWithRetry unwraps this on its own path, because it has to recognise the
+	// marker to stop retrying. Here it is only a wrapper to shed, so the caller
+	// gets back exactly the error their callback returned.
+	var hookErr *redirectHookError
+	if errors.As(err, &hookErr) {
+		return resp, hookErr.err
+	}
+	return resp, err
 }
 
 // doWithRetry executes request with retry logic
@@ -634,12 +868,21 @@ func (c *Client) doWithRetry(ctx context.Context, req *Request) (*Response, erro
 		}
 
 		// After cookie challenge, switch to H3 for retry (Akamai pattern)
-		if cookieChallengeRetried && req.ForceProtocol == ProtocolAuto && (c.quicManager != nil || c.masqueTransport != nil) {
+		q3, m3, _ := c.h3Transports()
+		if cookieChallengeRetried && req.ForceProtocol == ProtocolAuto && (q3 != nil || m3 != nil) {
 			reqCopy.ForceProtocol = ProtocolHTTP3
 		}
 
 		resp, err := c.doOnce(ctx, &reqCopy, nil)
 		if err != nil {
+			// A callback that refused a hop is a decision, not a fault. Replaying
+			// the request would re-invoke it once per attempt and send the caller
+			// a request they already vetoed. Unwrap so the error reaches them
+			// exactly as they returned it.
+			var hookErr *redirectHookError
+			if errors.As(err, &hookErr) {
+				return nil, hookErr.err
+			}
 			lastErr = err
 			continue
 		}
@@ -773,11 +1016,11 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 	if c.config.TLSOnly {
 		// TLSOnly mode: skip preset headers, only set required Host header
 		// User has full control over HTTP headers
-		applyTLSOnlyHeaders(httpReq, c.preset, req, parsedURL, c.getHeaderOrder())
+		applyTLSOnlyHeaders(httpReq, c.preset, req, parsedURL, c.effectiveHeaderOrder(req))
 	} else {
 		// Normal mode: apply preset headers based on FetchMode
 		// The library is smart: pick a mode, get coherent headers automatically
-		applyModeHeaders(httpReq, c.preset, req, parsedURL, c.getHeaderOrder())
+		applyModeHeaders(httpReq, c.preset, req, parsedURL, c.effectiveHeaderOrder(req))
 	}
 
 	// Apply authentication
@@ -849,7 +1092,7 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 		if c.config.Proxy != "" && !transport.SupportsQUIC(c.config.Proxy) {
 			return nil, fmt.Errorf("HTTP/3 requires SOCKS5 or MASQUE proxy: HTTP proxies cannot tunnel UDP")
 		}
-		if c.quicManager == nil && c.masqueTransport == nil && c.socks5H3Transport == nil {
+		if q, m, s5 := c.h3Transports(); q == nil && m == nil && s5 == nil {
 			if c.h3InitError != nil {
 				return nil, fmt.Errorf("HTTP/3 is disabled: %w", c.h3InitError)
 			}
@@ -872,7 +1115,8 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 		useH1 := c.shouldUseH1(hostKey)
 
 		// When using SOCKS5/MASQUE proxy, prefer HTTP/3 for best fingerprinting
-		usesQUICProxy := c.config.Proxy != "" && transport.SupportsQUIC(c.config.Proxy)
+		cfgProxy, _, _ := c.proxyURLs()
+		usesQUICProxy := cfgProxy != "" && transport.SupportsQUIC(cfgProxy)
 
 		if useH1 && !usesQUICProxy {
 			// Known to need HTTP/1.1
@@ -966,12 +1210,12 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 				maxRedirects = req.MaxRedirects
 			}
 
-			if redirectHistory == nil {
-				redirectHistory = make([]*RedirectInfo, 0)
-			}
-
+			// len() works on a nil slice, so the cap check needs no
+			// initialisation. Leaving it nil until the append below means a
+			// halted chain reports RedirectHistory the same way the
+			// don't-follow path does, instead of a non-nil empty slice.
 			if len(redirectHistory) >= maxRedirects {
-				return nil, fmt.Errorf("too many redirects (max %d)", maxRedirects)
+				return nil, fmt.Errorf("%w (max %d)", ErrTooManyRedirects, maxRedirects)
 			}
 
 			// Get redirect location
@@ -982,13 +1226,6 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 
 			// Resolve relative URL
 			redirectURL := JoinURL(reqURL, location)
-
-			// Add to redirect history
-			redirectHistory = append(redirectHistory, &RedirectInfo{
-				StatusCode: resp.StatusCode,
-				URL:        reqURL,
-				Headers:    headers,
-			})
 
 			// Determine new method based on redirect code
 			newMethod := method
@@ -1003,56 +1240,103 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 			schemeDowngrade := isSchemeDowngradeClient(reqURL, redirectURL)
 			crossOrigin := !sameOriginClient(reqURL, redirectURL)
 
-			var carriedHeaders map[string][]string
-			if len(req.Headers) > 0 {
-				carriedHeaders = make(map[string][]string, len(req.Headers))
-				for k, v := range req.Headers {
-					lk := strings.ToLower(k)
-					if schemeDowngrade && lk == "referer" {
-						continue
-					}
-					if (crossOrigin || schemeDowngrade) && (lk == "authorization" || lk == "proxy-authorization") {
-						continue
-					}
-					carriedHeaders[k] = v
+			// Ask the caller before taking the hop. After the cap check on
+			// purpose: the cap is a resource bound, not a policy question, and
+			// letting a veto answer it first would turn a "too many redirects"
+			// error into a silent success.
+			halt := false
+			if req.OnRedirect != nil {
+				hopErr := req.OnRedirect(&Redirect{
+					Hop:             len(redirectHistory) + 1,
+					StatusCode:      resp.StatusCode,
+					Headers:         headers,
+					From:            reqURL,
+					To:              redirectURL,
+					Method:          newMethod,
+					CrossOrigin:     crossOrigin,
+					SchemeDowngrade: schemeDowngrade,
+				})
+				if hopErr != nil && !errors.Is(hopErr, ErrUseLastResponse) {
+					// Marked so doWithRetry does not replay a vetoed request.
+					// Unwrapped again before it reaches the caller.
+					return nil, &redirectHookError{err: hopErr}
 				}
+				halt = hopErr != nil
 			}
 
-			carriedReferer := reqURL
-			carriedAuth := req.Auth
-			if schemeDowngrade {
-				carriedReferer = ""
-				carriedAuth = nil
-			} else if crossOrigin {
-				carriedAuth = nil
-			}
+			// A halt must NOT return from here. resp.Body is closed by the defer
+			// above, and it is the ReadAll further down that detaches the body
+			// into the Response the caller receives — returning early would hand
+			// back a body about to be closed. Fall through to it instead, which
+			// also gives the halted 3xx the same decompression, timing and hook
+			// treatment as any other final response.
+			if !halt {
+				// Add to redirect history only now that the hop is certain to
+				// be taken, so a halted 3xx does not appear in its own history.
+				redirectHistory = append(redirectHistory, &RedirectInfo{
+					StatusCode: resp.StatusCode,
+					URL:        reqURL,
+					Headers:    headers,
+				})
 
-			// Create new request for redirect
-			newReq := &Request{
-				Method:          newMethod,
-				URL:             redirectURL,
-				Headers:         carriedHeaders,
-				Timeout:         req.Timeout,
-				UserAgent:       req.UserAgent,
-				ForceProtocol:   req.ForceProtocol,
-				FetchMode:       req.FetchMode,
-				FetchSite:       FetchSiteCrossSite, // Redirects are usually cross-site
-				Referer:         carriedReferer,
-				Auth:            carriedAuth,
-				FollowRedirects: req.FollowRedirects,
-				MaxRedirects:    req.MaxRedirects,
-				DisableRetry:    true, // Don't retry redirects
-			}
-
-			// 307/308 preserve body (use cached bytes since original reader was consumed)
-			if resp.StatusCode == 307 || resp.StatusCode == 308 {
-				if len(bodyBytes) > 0 {
-					newReq.Body = bytes.NewReader(bodyBytes)
+				var carriedHeaders map[string][]string
+				if len(req.Headers) > 0 {
+					carriedHeaders = make(map[string][]string, len(req.Headers))
+					for k, v := range req.Headers {
+						lk := strings.ToLower(k)
+						if schemeDowngrade && lk == "referer" {
+							continue
+						}
+						if (crossOrigin || schemeDowngrade) && (lk == "authorization" || lk == "proxy-authorization") {
+							continue
+						}
+						carriedHeaders[k] = v
+					}
 				}
-			}
 
-			// Follow redirect
-			return c.doOnce(ctx, newReq, redirectHistory)
+				carriedReferer := reqURL
+				carriedAuth := req.Auth
+				if schemeDowngrade {
+					carriedReferer = ""
+					carriedAuth = nil
+				} else if crossOrigin {
+					carriedAuth = nil
+				}
+
+				// Create new request for redirect
+				newReq := &Request{
+					Method:          newMethod,
+					URL:             redirectURL,
+					Headers:         carriedHeaders,
+					Timeout:         req.Timeout,
+					UserAgent:       req.UserAgent,
+					ForceProtocol:   req.ForceProtocol,
+					FetchMode:       req.FetchMode,
+					FetchSite:       FetchSiteCrossSite, // Redirects are usually cross-site
+					Referer:         carriedReferer,
+					Auth:            carriedAuth,
+					FollowRedirects: req.FollowRedirects,
+					MaxRedirects:    req.MaxRedirects,
+					DisableRetry:    true, // Don't retry redirects
+					// Follows carriedHeaders above: a header the caller slotted
+					// explicitly would otherwise be re-placed by the preset table on
+					// the next hop, so the ordering rides along with the headers.
+					HeaderOrder: req.HeaderOrder,
+					// Without this the callback fires on hop one and vanishes,
+					// which is the failure HeaderOrder was fixed for.
+					OnRedirect: req.OnRedirect,
+				}
+
+				// 307/308 preserve body (use cached bytes since original reader was consumed)
+				if resp.StatusCode == 307 || resp.StatusCode == 308 {
+					if len(bodyBytes) > 0 {
+						newReq.Body = bytes.NewReader(bodyBytes)
+					}
+				}
+
+				// Follow redirect
+				return c.doOnce(ctx, newReq, redirectHistory)
+			}
 		}
 	}
 
@@ -1092,6 +1376,11 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 
 	timing.Total = float64(time.Since(startTime).Milliseconds())
 
+	var tlsInfo *TLSInfo
+	if req.IncludeTLSInfo && resp.TLS != nil {
+		tlsInfo = buildTLSInfo(resp.TLS.Version, resp.TLS.CipherSuite, resp.TLS.NegotiatedProtocol, resp.TLS.PeerCertificates)
+	}
+
 	response := &Response{
 		StatusCode:      resp.StatusCode,
 		Headers:         headers,
@@ -1101,6 +1390,7 @@ func (c *Client) doOnce(ctx context.Context, req *Request, redirectHistory []*Re
 		Protocol:        usedProtocol,
 		Request:         req,
 		RedirectHistory: redirectHistory,
+		TLS:             tlsInfo,
 		bodyBytes:       respBody,
 		bodyRead:        true,
 	}
@@ -1124,7 +1414,7 @@ func isRedirect(statusCode int) bool {
 // shouldTryHTTP3 checks if we should try HTTP/3 for this host
 func (c *Client) shouldTryHTTP3(hostKey string) bool {
 	// If no HTTP/3 transport is available, don't try HTTP/3
-	if c.quicManager == nil && c.masqueTransport == nil && c.socks5H3Transport == nil {
+	if q, m, s5 := c.h3Transports(); q == nil && m == nil && s5 == nil {
 		return false
 	}
 
@@ -1148,13 +1438,37 @@ func (c *Client) markH3Failed(hostKey string) {
 }
 
 // doHTTP3 executes the request over HTTP/3
+// proxyURLs returns a consistent snapshot of the configured proxy URLs.
+//
+// The proxy setters mutate these while requests are in flight, so the request
+// path must not read the config fields directly.
+func (c *Client) proxyURLs() (proxyURL, tcpProxy, udpProxy string) {
+	c.h3Mu.RLock()
+	defer c.h3Mu.RUnlock()
+	return c.config.Proxy, c.config.TCPProxy, c.config.UDPProxy
+}
+
+// h3Transports returns a consistent snapshot of the HTTP/3 transports.
+//
+// Callers must use the snapshot for the whole request rather than re-reading
+// the fields: a proxy rotation between the nil check and the use is exactly the
+// race that segfaulted the process.
+func (c *Client) h3Transports() (*pool.QUICManager, *transport.HTTP3Transport, *transport.HTTP3Transport) {
+	c.h3Mu.RLock()
+	defer c.h3Mu.RUnlock()
+	return c.quicManager, c.masqueTransport, c.socks5H3Transport
+}
+
 func (c *Client) doHTTP3(ctx context.Context, host, port string, httpReq *http.Request, timing *protocol.Timing, startTime time.Time) (*http.Response, string, error) {
 	connStart := time.Now()
 
+	// One snapshot for the whole request; see h3Transports.
+	quicManager, masqueTransport, socks5H3Transport := c.h3Transports()
+
 	// Use MASQUE transport if available (for MASQUE proxies)
-	if c.masqueTransport != nil {
+	if masqueTransport != nil {
 		firstByteTime := time.Now()
-		resp, err := c.masqueTransport.RoundTrip(httpReq)
+		resp, err := masqueTransport.RoundTrip(httpReq)
 		if err != nil {
 			return nil, "", err
 		}
@@ -1163,9 +1477,9 @@ func (c *Client) doHTTP3(ctx context.Context, host, port string, httpReq *http.R
 	}
 
 	// Use SOCKS5 UDP relay transport if available (for SOCKS5 proxies)
-	if c.socks5H3Transport != nil {
+	if socks5H3Transport != nil {
 		firstByteTime := time.Now()
-		resp, err := c.socks5H3Transport.RoundTrip(httpReq)
+		resp, err := socks5H3Transport.RoundTrip(httpReq)
 		if err != nil {
 			return nil, "", err
 		}
@@ -1174,13 +1488,16 @@ func (c *Client) doHTTP3(ctx context.Context, host, port string, httpReq *http.R
 	}
 
 	// Use QUICManager for direct connections
-	conn, err := c.quicManager.GetConn(ctx, host, port)
+	if quicManager == nil {
+		return nil, "", fmt.Errorf("no HTTP/3 transport available")
+	}
+	conn, err := quicManager.GetConn(ctx, host, port)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get QUIC connection: %w", err)
 	}
 
 	// Calculate timing
-	if conn.UseCount == 1 {
+	if conn.Uses() == 1 {
 		connTime := float64(time.Since(connStart).Milliseconds())
 		timing.DNSLookup = connTime / 3
 		timing.TCPConnect = 0
@@ -1188,7 +1505,16 @@ func (c *Client) doHTTP3(ctx context.Context, host, port string, httpReq *http.R
 	}
 
 	firstByteTime := time.Now()
-	resp, err := conn.HTTP3RT.RoundTrip(httpReq)
+	// See doHTTP2: conn.RoundTrip keeps the connection busy for the body's life.
+	resp, err := conn.RoundTrip(httpReq)
+	if errors.Is(err, pool.ErrConnRetired) {
+		// Pre-send rejection only, so retrying once is method-safe.
+		conn, err = c.quicManager.GetConn(ctx, host, port)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to get QUIC connection: %w", err)
+		}
+		resp, err = conn.RoundTrip(httpReq)
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -1206,8 +1532,10 @@ func (c *Client) doHTTP2(ctx context.Context, host, port string, httpReq *http.R
 		return nil, "", fmt.Errorf("failed to get connection: %w", err)
 	}
 
-	// Calculate timing
-	if conn.UseCount == 1 {
+	// Calculate timing. Uses(), not conn.UseCount: the pool bumps that counter
+	// under the connection's mutex in MarkUsed, so a bare read here races with
+	// any other request acquiring the same multiplexed H2 connection.
+	if conn.Uses() == 1 {
 		connTime := float64(time.Since(connStart).Milliseconds())
 		timing.DNSLookup = connTime / 3
 		timing.TCPConnect = connTime / 3
@@ -1215,7 +1543,22 @@ func (c *Client) doHTTP2(ctx context.Context, host, port string, httpReq *http.R
 	}
 
 	firstByteTime := time.Now()
-	resp, err := conn.HTTP2Conn.RoundTrip(httpReq)
+	// conn.RoundTrip (not conn.HTTP2Conn.RoundTrip) holds the pooled connection
+	// busy for the whole life of the response body, so the pool reaper cannot
+	// close the socket underneath a download (issue #83).
+	resp, err := conn.RoundTrip(httpReq)
+	if errors.Is(err, pool.ErrConnRetired) {
+		// The connection was retired between GetConn and RoundTrip. That
+		// sentinel is returned strictly BEFORE anything is written, so httpReq's
+		// body is untouched and one retry on a fresh connection is method-safe.
+		// A second retirement falls through to the generic error path; this
+		// never loops. (Retry borrowed from PR #84.)
+		conn, err = c.poolManager.GetConn(ctx, host, port)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to get connection: %w", err)
+		}
+		resp, err = conn.RoundTrip(httpReq)
+	}
 	if err != nil {
 		return nil, "", fmt.Errorf("request failed: %w", err)
 	}
@@ -1346,7 +1689,48 @@ func (c *Client) SetTCPProxy(proxyURL string) {
 // SetUDPProxy changes the proxy for HTTP/3 (QUIC) connections
 // Supports SOCKS5 (UDP relay) and MASQUE (CONNECT-UDP) proxies
 // Pass empty string to switch to direct connection (no proxy)
+// tlsVerifyFromConfig rebuilds the verification hooks from the stored config.
+//
+// Every path that closes and recreates a transport has to re-apply these. They
+// live on the transport objects, not on the Client, so a rebuild that only
+// re-applies InsecureSkipVerify silently drops the caller's certificate
+// verification and leaves that protocol accepting anything the system roots
+// accept. On a client whose whole point is proxy rotation, that is the ordinary
+// usage pattern, and it fails open with no error.
+func (c *Client) tlsVerifyFromConfig() *transport.TLSVerify {
+	if c.config.VerifyPeerCertificate == nil && c.config.VerifyConnection == nil && c.config.RootCAs == nil {
+		return nil
+	}
+	return &transport.TLSVerify{
+		VerifyPeerCertificate: c.config.VerifyPeerCertificate,
+		VerifyConnection:      c.config.VerifyConnection,
+		RootCAs:               c.config.RootCAs,
+	}
+}
+
+// reapplyH3TLSVerify re-installs the hooks on whichever HTTP/3 transports exist.
+func (c *Client) reapplyH3TLSVerify() {
+	v := c.tlsVerifyFromConfig()
+	if v == nil {
+		return
+	}
+	if c.quicManager != nil {
+		c.quicManager.SetTLSVerify(v)
+	}
+	if c.masqueTransport != nil {
+		c.masqueTransport.SetTLSVerify(v)
+	}
+	if c.socks5H3Transport != nil {
+		c.socks5H3Transport.SetTLSVerify(v)
+	}
+}
+
 func (c *Client) SetUDPProxy(proxyURL string) {
+	// Hold the write lock for the whole close-and-rebuild. Without it a request
+	// in flight observes the window where every transport is nil and panics.
+	c.h3Mu.Lock()
+	defer c.h3Mu.Unlock()
+
 	// Close and nil out all existing HTTP/3 transports
 	if c.quicManager != nil {
 		c.quicManager.Close()
@@ -1398,6 +1782,12 @@ func (c *Client) SetUDPProxy(proxyURL string) {
 		}
 	}
 
+	// The transports above are brand new, so the caller's certificate
+	// verification has to be put back on them. Without this a client that pinned
+	// a certificate and then rotated its proxy loses HTTP/3 verification from
+	// that point on, silently.
+	c.reapplyH3TLSVerify()
+
 	// Clear H3 failure cache - new proxy might have different behavior
 	c.h3FailuresMu.Lock()
 	c.h3Failures = make(map[string]time.Time)
@@ -1422,6 +1812,10 @@ func (c *Client) GetUDPProxy() string {
 // SetHeaderOrder sets a custom header order for all requests.
 // Pass nil or empty slice to reset to preset's default order.
 // Order should contain lowercase header names.
+//
+// This is client-wide state. To vary the order per request without serializing
+// concurrent callers on it, set Request.HeaderOrder instead; a request that
+// carries one ignores whatever is installed here.
 func (c *Client) SetHeaderOrder(order []string) {
 	c.customHeaderOrderMu.Lock()
 	defer c.customHeaderOrderMu.Unlock()
@@ -1469,6 +1863,18 @@ func (c *Client) getHeaderOrder() []string {
 	return c.customHeaderOrder
 }
 
+// effectiveHeaderOrder returns the header order for a single request: the
+// request's own HeaderOrder when it sets one, otherwise the client-wide order
+// from SetHeaderOrder. The per-request list wins outright — merging two prefixes
+// would let one silently reorder the other. Lowercasing is left to
+// transport.CompleteHeaderOrder, which normalizes every name it places.
+func (c *Client) effectiveHeaderOrder(req *Request) []string {
+	if req != nil && len(req.HeaderOrder) > 0 {
+		return req.HeaderOrder
+	}
+	return c.getHeaderOrder()
+}
+
 // Stats returns connection pool statistics
 func (c *Client) Stats() map[string]struct {
 	Total    int
@@ -1505,11 +1911,10 @@ func applyTLSOnlyHeaders(httpReq *http.Request, preset *fingerprint.Preset, req 
 	// Use H2HeaderOrder (full HPACK position table) so user-supplied headers
 	// outside the default emit set (cache-control, content-type, cookie, …)
 	// land in their real-Chrome position instead of being appended at the end.
-	if len(customHeaderOrder) > 0 {
-		httpReq.Header[http.HeaderOrderKey] = customHeaderOrder
-	} else {
-		httpReq.Header[http.HeaderOrderKey] = preset.H2HeaderOrder()
-	}
+	// CompleteHeaderOrder names whatever is still left over so it can't fall
+	// through to the encoders' randomised map iteration. User headers are
+	// already merged into httpReq.Header above, hence the nil.
+	httpReq.Header[http.HeaderOrderKey] = transport.CompleteHeaderOrder(customHeaderOrder, preset.H2HeaderOrder(), httpReq.Header, nil)
 
 	// Set pseudo-header order from preset H2Config (explicit > heuristic > Chrome default)
 	if order := preset.H2PseudoHeaderOrder(); order != nil {
@@ -1583,12 +1988,9 @@ func applyModeHeaders(httpReq *http.Request, preset *fingerprint.Preset, req *Re
 	// Set header order for HTTP/2 and HTTP/3 fingerprinting
 	// Use H2HeaderOrder (full HPACK position table) — see the matching
 	// comment in transport.applyPresetHeaders for the rationale. Caller
-	// override still wins.
-	if len(customHeaderOrder) > 0 {
-		httpReq.Header[http.HeaderOrderKey] = customHeaderOrder
-	} else {
-		httpReq.Header[http.HeaderOrderKey] = preset.H2HeaderOrder()
-	}
+	// override still wins, completed with the preset table and then whatever
+	// is left, so nothing reaches the encoders' randomised map iteration.
+	httpReq.Header[http.HeaderOrderKey] = transport.CompleteHeaderOrder(customHeaderOrder, preset.H2HeaderOrder(), httpReq.Header, nil)
 
 	// Set pseudo-header order from preset H2Config (explicit > heuristic > Chrome default)
 	if order := preset.H2PseudoHeaderOrder(); order != nil {
@@ -1694,7 +2096,6 @@ func sniffXHRMode(req *Request) bool {
 	// submissions always carry one of the form Content-Types above.
 	return true
 }
-
 
 // applyNavigationModeHeaders sets headers for page navigation (human clicked link)
 // Uses preset's values for Accept/Accept-Encoding/Accept-Language when available,

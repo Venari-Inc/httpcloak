@@ -197,16 +197,16 @@ import httpcloak from "httpcloak";
 
 // Simple request
 const session = new httpcloak.Session({ preset: "chrome-latest" });
-const r = await session.get("https://example.com");
-console.log(r.statusCode, r.protocol);
+const r1 = await session.get("https://example.com");
+console.log(r1.statusCode, r1.protocol);
 
 // POST with JSON
-const r = await session.post("https://httpbin.org/post", {
+const r2 = await session.post("https://httpbin.org/post", {
     json: { key: "value" }
 });
 
 // Custom headers
-const r = await session.get("https://httpbin.org/headers", {
+const r3 = await session.get("https://httpbin.org/headers", {
     headers: { "X-Custom": "value" }
 });
 
@@ -220,16 +220,16 @@ using HttpCloak;
 
 // Simple request
 using var session = new Session(preset: Presets.Chrome145);
-var r = session.Get("https://example.com");
-Console.WriteLine($"{r.StatusCode} {r.Protocol}");
+var r1 = session.Get("https://example.com");
+Console.WriteLine($"{r1.StatusCode} {r1.Protocol}");
 
 // POST with JSON
-var r = session.PostJson("https://httpbin.org/post",
+var r2 = session.PostJson("https://httpbin.org/post",
     new { key = "value" }
 );
 
 // Custom headers
-var r = session.Get("https://httpbin.org/headers",
+var r3 = session.Get("https://httpbin.org/headers",
     headers: new Dictionary<string, string> { ["X-Custom"] = "value" }
 );
 ```
@@ -333,17 +333,40 @@ session = httpcloak.Session(proxy="socks5://...", enable_speculative_tls=True)
 Connect to a different host than what appears in TLS SNI.
 
 ```go
-client := httpcloak.NewClient("chrome-latest",
+session := httpcloak.NewSession("chrome-latest",
     httpcloak.WithConnectTo("public-cdn.com", "actual-backend.internal"),
 )
+defer session.Close()
 ```
 
-### 📌 Certificate Pinning
+### 📌 Certificate Pinning & Verification
+
+Pin a key, or take verification over entirely with your own callback:
 
 ```go
-client.PinCertificate("sha256/AAAA...",
-    httpcloak.PinOptions{IncludeSubdomains: true})
+c := client.NewClient("chrome-latest")
+defer c.Close()
+
+// Pin an SPKI SHA-256, scoped to one host
+c.PinCertificate("sha256/AAAA...", client.ForHost("api.example.com"), client.IncludeSubdomains())
 ```
+
+Or run your own checks, mirroring `crypto/tls`:
+
+```go
+session := httpcloak.NewSession("chrome-latest",
+    httpcloak.WithVerifyPeerCertificate(func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
+        // Return an error to abort the handshake.
+        return myPinCheck(rawCerts)
+    }),
+)
+defer session.Close()
+```
+
+`WithVerifyConnection` gives you the completed `tls.ConnectionState`. `WithTLSConfig`
+accepts a standard `*tls.Config` but reads only its verification fields: anything that
+would reshape the ClientHello is ignored on purpose, since that would change how you
+look on the wire.
 
 ### 🪝 Request Hooks
 
@@ -396,11 +419,12 @@ session = httpcloak.Session(
 
 **Go:**
 ```go
-client := client.NewClient("chrome-latest-windows",
-    client.WithTCPFingerprint(fingerprint.TCPFingerprint{
+session := httpcloak.NewSession("chrome-latest-windows",
+    httpcloak.WithTCPFingerprint(fingerprint.TCPFingerprint{
         TTL: 128, MSS: 1460, WindowSize: 64240, WindowScale: 8, DFBit: true,
     }),
 )
+defer session.Close()
 ```
 
 **Node.js:**
@@ -467,6 +491,16 @@ print(session.get_udp_proxy())  # UDP proxy URL
 ```
 
 ### 📋 Header Order Customization
+
+> **A partial list is a prefix, not a replacement.** The names you pass are emitted
+> first, in your order; every header you leave out keeps its normal position from the
+> preset's own table, and anything still unplaced follows sorted by name. So naming one
+> header costs you nothing for the rest. Passing a complete list gives you exactly that
+> wire order, and passing an empty list resets to the preset default.
+>
+> Need it for a single request instead of the whole session? Set `Request.HeaderOrder`,
+> which overrides the session-wide order for that request alone and takes no lock, so
+> concurrent requests can each carry a different one.
 
 Control the order headers are sent for advanced fingerprinting scenarios.
 
@@ -895,11 +929,10 @@ c.GetProxy()               // Get current proxy
 c.GetTCPProxy()            // Get current TCP proxy
 c.GetUDPProxy()            // Get current UDP proxy
 
-// Session persistence (0-RTT resumption)
-c.Save("session.json")     // Save to file
-c, _ = client.Load("session.json")  // Load from file
-data, _ := c.Marshal()     // Export as string
-c, _ = client.Unmarshal(data)  // Import from string
+// Session persistence (0-RTT resumption) lives on httpcloak.Session:
+//   s.Save("session.json")
+//   s, _ := httpcloak.LoadSession("session.json")
+//   data, _ := s.Marshal()
 
 // Response object
 resp.StatusCode
@@ -1010,44 +1043,16 @@ response.Protocol
 
 ## Browser Presets
 
-| Preset | Platform | PQ | H3 |
-|--------|----------|:--:|:--:|
-| `chrome-146` | Auto | ✅ | ✅ |
-| `chrome-146-windows` | Windows | ✅ | ✅ |
-| `chrome-146-macos` | macOS | ✅ | ✅ |
-| `chrome-146-linux` | Linux | ✅ | ✅ |
-| `chrome-146-ios` | iOS | ✅ | ✅ |
-| `chrome-146-android` | Android | ✅ | ✅ |
-| `chrome-145` | Auto | ✅ | ✅ |
-| `chrome-145-windows` | Windows | ✅ | ✅ |
-| `chrome-145-macos` | macOS | ✅ | ✅ |
-| `chrome-145-linux` | Linux | ✅ | ✅ |
-| `chrome-145-ios` | iOS | ✅ | ✅ |
-| `chrome-145-android` | Android | ✅ | ✅ |
-| `chrome-144` | Auto | ✅ | ✅ |
-| `chrome-144-windows` | Windows | ✅ | ✅ |
-| `chrome-144-macos` | macOS | ✅ | ✅ |
-| `chrome-144-linux` | Linux | ✅ | ✅ |
-| `chrome-143` | Auto | ✅ | ✅ |
-| `chrome-143-windows` | Windows | ✅ | ✅ |
-| `chrome-143-macos` | macOS | ✅ | ✅ |
-| `chrome-143-linux` | Linux | ✅ | ✅ |
-| `chrome-141` | Auto | ✅ | ❌ |
-| `chrome-133` | Auto | ✅ | ❌ |
-| `firefox-133` | Auto | ❌ | ❌ |
-| `safari-18` | macOS | ❌ | ✅ |
-| `safari-18-ios` | iOS | ❌ | ✅ |
-| `safari-17-ios` | iOS | ❌ | ❌ |
-| `chrome-146-ios` | iOS | ✅ | ✅ |
-| `chrome-145-ios` | iOS | ✅ | ✅ |
-| `chrome-144-ios` | iOS | ✅ | ✅ |
-| `chrome-143-ios` | iOS | ✅ | ✅ |
-| `chrome-146-android` | Android | ✅ | ✅ |
-| `chrome-145-android` | Android | ✅ | ✅ |
-| `chrome-144-android` | Android | ✅ | ✅ |
-| `chrome-143-android` | Android | ✅ | ✅ |
+| Browser | Versions | Platform suffixes | PQ | HTTP/3 |
+|---------|----------|-------------------|:--:|:------:|
+| Chrome | 143 to 151, `latest` | `-windows` `-linux` `-macos` `-android` `-ios` | yes | yes |
+| Chrome | 133, 141 | none | yes | no |
+| Firefox | 148, `latest` | `-windows` `-linux` `-macos` | yes | no |
+| Firefox | 133 | `-windows` `-linux` `-macos` | no | no |
+| Safari | 18, `latest` | none, `-ios` | yes | yes |
+| Safari | 17 | `-ios` | no | no |
 
-**PQ** = Post-Quantum (X25519MLKEM768) · **H3** = HTTP/3
+**PQ** = post-quantum key exchange (X25519MLKEM768). `Presets()` returns the full list.
 
 ---
 

@@ -9,6 +9,11 @@
 // here is the shape the root package's NewSession marshals internally.
 package protocol
 
+import (
+	"crypto/tls"
+	"crypto/x509"
+)
+
 // MessageType represents the type of IPC message
 type MessageType string
 
@@ -174,6 +179,13 @@ type SessionConfig struct {
 	// TLS options
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 
+	// TLSVerifyPeerCertificate and TLSVerifyConnection are caller-supplied
+	// certificate verification hooks. Not serialisable, so they carry no JSON
+	// tag and are ignored by any config that round-trips through JSON.
+	TLSVerifyPeerCertificate func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error `json:"-"`
+	TLSVerifyConnection      func(cs tls.ConnectionState) error                                  `json:"-"`
+	TLSRootCAs               *x509.CertPool                                                      `json:"-"`
+
 	// Connection options
 	DisableKeepAlives bool `json:"disableKeepAlives,omitempty"`
 	DisableHTTP3      bool `json:"disableHttp3,omitempty"`
@@ -287,12 +299,12 @@ type CookieSetRequest struct {
 	ID      string      `json:"id"`
 	Type    MessageType `json:"type"`
 	Session string      `json:"session"`
-	URL     string      `json:"url"`    // URL domain for the cookie
-	Name    string      `json:"name"`   // Cookie name
-	Value   string      `json:"value"`  // Cookie value
-	Path    string      `json:"path"`   // Cookie path (optional)
-	Domain  string      `json:"domain"` // Cookie domain (optional)
-	Secure  bool        `json:"secure"` // Secure flag
+	URL     string      `json:"url"`               // URL domain for the cookie
+	Name    string      `json:"name"`              // Cookie name
+	Value   string      `json:"value"`             // Cookie value
+	Path    string      `json:"path"`              // Cookie path (optional)
+	Domain  string      `json:"domain"`            // Cookie domain (optional)
+	Secure  bool        `json:"secure"`            // Secure flag
 	Expires int64       `json:"expires,omitempty"` // Unix timestamp (0 = session cookie)
 }
 
@@ -322,11 +334,11 @@ type Cookie struct {
 
 // CookieResponse contains cookie data
 type CookieResponse struct {
-	ID      string            `json:"id"`
-	Type    MessageType       `json:"type"`
-	Cookies map[string]string `json:"cookies,omitempty"` // For simple get (name -> value)
-	All     map[string][]Cookie `json:"all,omitempty"`   // For all cookies (domain -> cookies)
-	Error   *ErrorInfo        `json:"error,omitempty"`
+	ID      string              `json:"id"`
+	Type    MessageType         `json:"type"`
+	Cookies map[string]string   `json:"cookies,omitempty"` // For simple get (name -> value)
+	All     map[string][]Cookie `json:"all,omitempty"`     // For all cookies (domain -> cookies)
+	Error   *ErrorInfo          `json:"error,omitempty"`
 }
 
 // PresetListResponse lists available presets

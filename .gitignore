@@ -39,11 +39,18 @@ temp/
 /test_session_resumption
 /custom-fingerprint
 /streaming
+/bandwidth
+/httpcloak-clib
 tests/
 # Internal tests (not published)
 internal_tests/
 # Root-level _test.go files stay local (subdir tests still ship)
 /*_test.go
+# ...except real regression locks, which must ship. The blanket rule above
+# exists to keep throwaway root-level scratch tests out of the tree.
+!/local_proxy_gzip_test.go
+!/rootcas_verify_test.go
+!/redirect_test.go
 
 # Local workspace config (points at machine-local fork paths)
 go.work

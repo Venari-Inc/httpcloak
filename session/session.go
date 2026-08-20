@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -153,8 +155,8 @@ func NewSessionWithOptions(id string, config *protocol.SessionConfig, opts *Sess
 
 	if needsConfig {
 		transportConfig = &transport.TransportConfig{
-			ConnectTo:             config.ConnectTo,
-			ECHConfigDomain:       config.ECHConfigDomain,
+			ConnectTo:            config.ConnectTo,
+			ECHConfigDomain:      config.ECHConfigDomain,
 			TLSOnly:              config.TLSOnly,
 			QuicIdleTimeout:      time.Duration(config.QuicIdleTimeout) * time.Second,
 			LocalAddr:            config.LocalAddress,
@@ -200,6 +202,15 @@ func NewSessionWithOptions(id string, config *protocol.SessionConfig, opts *Sess
 		t.SetInsecureSkipVerify(true)
 	}
 
+	// Install caller-supplied TLS verification hooks (issue #85)
+	if config.TLSVerifyPeerCertificate != nil || config.TLSVerifyConnection != nil || config.TLSRootCAs != nil {
+		t.SetTLSVerify(&transport.TLSVerify{
+			VerifyPeerCertificate: config.TLSVerifyPeerCertificate,
+			VerifyConnection:      config.TLSVerifyConnection,
+			RootCAs:               config.TLSRootCAs,
+		})
+	}
+
 	// Set protocol preference
 	if config.ForceHTTP1 {
 		t.SetProtocol(transport.ProtocolHTTP1)
@@ -233,21 +244,21 @@ func NewSessionWithOptions(id string, config *protocol.SessionConfig, opts *Sess
 	}
 
 	return &Session{
-		ID:                      id,
-		CreatedAt:               time.Now(),
-		LastUsed:                time.Now(),
-		RequestCount:            0,
-		Config:                  config,
-		transport:               t,
-		cookies:                 NewCookieJar(),
-		cacheEntries:            make(map[string]*cacheEntry),
-		conditionalCacheEnabled: !config.WithoutConditionalCache,
-		clientHints:             make(map[string]map[string]bool),
+		ID:                            id,
+		CreatedAt:                     time.Now(),
+		LastUsed:                      time.Now(),
+		RequestCount:                  0,
+		Config:                        config,
+		transport:                     t,
+		cookies:                       NewCookieJar(),
+		cacheEntries:                  make(map[string]*cacheEntry),
+		conditionalCacheEnabled:       !config.WithoutConditionalCache,
+		clientHints:                   make(map[string]map[string]bool),
 		clientHintsEnabled:            !config.WithoutClientHints,
 		highEntropyClientHintsEnabled: !config.WithoutHighEntropyClientHints,
-		keyLogWriter:            keyLogWriter,
-		switchProtocol:          switchProto,
-		active:                  true,
+		keyLogWriter:                  keyLogWriter,
+		switchProtocol:                switchProto,
+		active:                        true,
 	}
 }
 
@@ -256,8 +267,65 @@ func (s *Session) Request(ctx context.Context, req *transport.Request) (*transpo
 	return s.requestWithRedirects(ctx, req, 0, nil)
 }
 
+// cloneHeaders returns a deep copy of a header map (keys + value slices).
+// A nil input yields a fresh empty map, so callers can mutate the result
+// freely without ever touching the source.
+func cloneHeaders(h map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(h))
+	for k, v := range h {
+		vc := make([]string, len(v))
+		copy(vc, v)
+		out[k] = vc
+	}
+	return out
+}
+
 // requestWithRedirects handles the actual request with redirect following
 func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Request, redirectCount int, history []*transport.RedirectInfo) (*transport.Response, error) {
+	// Work on a private copy of the caller's request. The session mutates
+	// req.Headers (cache-control, conditional-cache validators, cookies, client
+	// hints) outside any lock the caller knows about; if a caller shares one
+	// Request (and its Headers map) across goroutines on this session, those
+	// mutations would race — concurrent map writes are an unrecoverable fatal
+	// error, and across cgo that surfaces as a silent process crash. Copying
+	// also stops cross-request contamination of the caller's map. Redirect hops
+	// already build their own Request, so only the caller-supplied one is copied.
+	if redirectCount == 0 {
+		reqCopy := *req
+		reqCopy.Headers = cloneHeaders(req.Headers)
+		req = &reqCopy
+
+		// Derive a replay source before anything reads the body. Without one, a
+		// 307/308 hop and a retried attempt both re-send an exhausted reader:
+		// an empty body under the caller's Content-Type, with no error anywhere.
+		// This is the one seam every path crosses — Session.Request takes a
+		// transport.Request directly, so deriving in the root package instead
+		// would miss it.
+		if req.BodyReader != nil && req.GetBody == nil {
+			req.GetBody = transport.DeriveGetBody(req.BodyReader)
+		}
+
+		// Establish ONE overall deadline for the whole logical request. Every
+		// redirect hop and every retry attempt shares it: transport.Do re-derives
+		// a fresh WithTimeout(ctx, timeout) on each call, so without a single
+		// parent deadline the per-attempt budgets STACK — a 1s timeout was seen
+		// riding to ~4.8s across a redirect + retry burst. The per-request Timeout
+		// wins; otherwise the session/transport timeout. context.WithTimeout takes
+		// the earlier deadline, so transport.Do's inner wrap harmlessly clamps to
+		// this and can no longer extend it. Recursion and the retry loop below
+		// both use this bounded ctx; the top frame's defer keeps it alive until
+		// the entire chain returns (bodies are buffered before Do returns).
+		overall := req.Timeout
+		if overall <= 0 && s.transport != nil {
+			overall = s.transport.Timeout()
+		}
+		if overall > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, overall)
+			defer cancel()
+		}
+	}
+
 	s.mu.Lock()
 	if !s.active {
 		s.mu.Unlock()
@@ -329,6 +397,13 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 		origCookie = c[0]
 	}
 
+	// A one-shot streaming body cannot go on the wire twice. Unlike a redirect,
+	// a retry is optional — we already hold a response or a real error — so a
+	// non-replayable body disables the retry rather than corrupting it or
+	// failing the request. Body []byte needs nothing: the transport rebuilds a
+	// bytes.Reader over it on every Do.
+	bodyReplayable := req.BodyReader == nil || req.GetBody != nil
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		// Build Cookie header fresh each attempt from original + session cookies.
 		// Skip the jar lookup entirely when WithoutCookieJar — caller-provided
@@ -350,6 +425,17 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 		// also marks req for the transport to strip the preset trio on a full
 		// opt-out.
 		s.applyClientHintPolicy(host, req)
+
+		// Re-arm the streaming body for this attempt; the previous one drained
+		// it. Guarded by bodyReplayable at the bottom of the loop, so GetBody is
+		// never nil here.
+		if attempt > 0 && req.BodyReader != nil {
+			fresh, gerr := req.GetBody()
+			if gerr != nil {
+				return nil, fmt.Errorf("httpcloak: reopen request body for retry: %w", gerr)
+			}
+			req.BodyReader = fresh
+		}
 
 		resp, err = s.transport.Do(ctx, req)
 
@@ -384,7 +470,7 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 			}
 		}
 
-		if !shouldRetry || attempt >= maxRetries {
+		if !shouldRetry || !bodyReplayable || attempt >= maxRetries {
 			break
 		}
 
@@ -443,7 +529,14 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 
 		if followRedirects {
 			if redirectCount >= maxRedirects {
-				return nil, errors.New("too many redirects")
+				// Hand back the response carrying the last Location alongside
+				// the error, the way net/http.Client.do does when CheckRedirect
+				// fails. No socket rides on it — transport.Do has already
+				// buffered the body into a NopCloser — so a caller that ignores
+				// resp leaks nothing, and one that wants to know where the chain
+				// ended up can read it.
+				resp.History = history
+				return resp, fmt.Errorf("%w (max %d)", transport.ErrTooManyRedirects, maxRedirects)
 			}
 
 			// Get Location header (first value from slice)
@@ -462,14 +555,6 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 				return resp, nil
 			}
 
-			// Add current response to redirect history
-			redirectInfo := &transport.RedirectInfo{
-				StatusCode: resp.StatusCode,
-				URL:        req.URL,
-				Headers:    resp.Headers,
-			}
-			history = append(history, redirectInfo)
-
 			// Resolve relative URL
 			redirectURL := resolveURL(req.URL, location)
 
@@ -479,13 +564,6 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 				newMethod = "GET"
 			}
 
-			// Create redirect request
-			newReq := &transport.Request{
-				Method:  newMethod,
-				URL:     redirectURL,
-				Headers: make(map[string][]string),
-			}
-
 			// Browser-parity scheme/origin policy for the new hop:
 			//   - https → http downgrade: strip Referer (Chrome's default
 			//     strict-origin-when-cross-origin), Authorization, and
@@ -493,8 +571,66 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 			//   - cross-origin (any scheme change or host/port change):
 			//     strip Authorization and Proxy-Authorization — Chrome, Firefox,
 			//     curl (≥7.58) and Fetch all do this to prevent credential leaks.
+			// Computed here rather than beside the header loop because the
+			// callback below is handed both.
 			schemeDowngrade := isSchemeDowngrade(req.URL, redirectURL)
 			crossOrigin := !sameOrigin(req.URL, redirectURL)
+
+			// Ask the caller before taking the hop. This runs after the cap
+			// check on purpose: the cap is a resource bound, not a policy
+			// question, and letting a veto answer it first would turn a
+			// "too many redirects" error into a silent success.
+			//
+			// history still holds only the hops BEFORE this one, because the
+			// append below has not run yet — so a halted 3xx does not appear in
+			// its own History, matching the no-Location return above.
+			if req.OnRedirect != nil {
+				hop := &transport.Redirect{
+					Hop:             redirectCount + 1,
+					StatusCode:      resp.StatusCode,
+					Headers:         resp.Headers,
+					From:            req.URL,
+					To:              redirectURL,
+					Method:          newMethod,
+					CrossOrigin:     crossOrigin,
+					SchemeDowngrade: schemeDowngrade,
+				}
+				if err := req.OnRedirect(hop); err != nil {
+					if errors.Is(err, transport.ErrUseLastResponse) {
+						resp.History = history
+						return resp, nil
+					}
+					// Unwrapped, so errors.Is against the caller's own sentinel
+					// matches exactly what they returned.
+					return nil, err
+				}
+			}
+
+			// Create redirect request. Everything below the first four fields is
+			// a property of the caller's request rather than of one hop, and
+			// dropping them silently downgraded every hop after the first back to
+			// the session-wide defaults: a request that asked for TLS-only or no
+			// client hints got it on hop 0 only, FollowRedirects: &true against a
+			// session defaulting to false stopped after one hop, and the
+			// per-request Timeout fell back to the transport's. HeaderOrder rides
+			// along because the caller's headers do (see the copy loop below): a
+			// header they slotted explicitly on this hop would otherwise be
+			// re-placed by the preset table or the sorted tail on the next one,
+			// so the ordering has to follow the headers it orders or the two
+			// disagree mid-chain.
+			newReq := &transport.Request{
+				Method:                        newMethod,
+				URL:                           redirectURL,
+				Headers:                       make(map[string][]string),
+				HeaderOrder:                   req.HeaderOrder,
+				Timeout:                       req.Timeout,
+				TLSOnly:                       req.TLSOnly,
+				FollowRedirects:               req.FollowRedirects,
+				DisableConditionalCache:       req.DisableConditionalCache,
+				DisableClientHints:            req.DisableClientHints,
+				DisableHighEntropyClientHints: req.DisableHighEntropyClientHints,
+				OnRedirect:                    req.OnRedirect,
+			}
 
 			// Copy safe headers
 			for k, v := range req.Headers {
@@ -529,10 +665,50 @@ func (s *Session) requestWithRedirects(ctx context.Context, req *transport.Reque
 				newReq.Headers["Referer"] = []string{ref}
 			}
 
-			// 307/308 preserve body
+			// 307/308 preserve the method and the body. Precedence matches the
+			// transport's own: BodyReader wins over Body.
+			//
+			// A streaming BodyReader was drained by the hop that just finished,
+			// so it is re-opened from GetBody — which rides along too, or a
+			// second 307 in the same chain would find nothing to re-open. With
+			// neither, stop: this used to copy Body alone, and since Session.Do
+			// only ever populates BodyReader, every 307 through the root session
+			// sent the next hop with no body at all under the caller's
+			// Content-Type. Nothing errored and nothing short-wrote.
 			if resp.StatusCode == 307 || resp.StatusCode == 308 {
-				newReq.Body = req.Body
+				switch {
+				case req.BodyReader != nil && req.GetBody != nil:
+					fresh, gerr := req.GetBody()
+					if gerr != nil {
+						resp.History = history
+						return resp, fmt.Errorf("httpcloak: reopen request body for %d redirect to %s: %w",
+							resp.StatusCode, redirectURL, gerr)
+					}
+					newReq.BodyReader = fresh
+					newReq.GetBody = req.GetBody
+				case req.BodyReader != nil:
+					resp.History = history
+					return resp, fmt.Errorf("cannot follow %d redirect to %s: %w",
+						resp.StatusCode, redirectURL, transport.ErrBodyNotReplayable)
+				default:
+					newReq.Body = req.Body
+				}
 			}
+
+			// Add this response to the history only now that the hop is
+			// certain to be taken. Every early return above therefore sees a
+			// history of the hops before it, and no response ever appears in
+			// its own History.
+			history = append(history, &transport.RedirectInfo{
+				StatusCode: resp.StatusCode,
+				URL:        req.URL,
+				Headers:    resp.Headers,
+			})
+
+			// Release the intermediate 3xx. The body is a NopCloser over a
+			// buffer the transport already drained, so this frees nothing today;
+			// it stops being a no-op the moment body streaming reaches Do.
+			resp.Close()
 
 			// Follow redirect with accumulated history
 			return s.requestWithRedirects(ctx, newReq, redirectCount+1, history)
@@ -1535,6 +1711,14 @@ type StreamResponse = transport.StreamResponse
 // The caller is responsible for closing the response when done
 // Note: Streaming does NOT support redirects - use Request() for redirect handling
 func (s *Session) RequestStream(ctx context.Context, req *transport.Request) (*StreamResponse, error) {
+	// Private copy: the session mutates req.Headers (cookies, client hints)
+	// below, so never touch the caller's Request or its map. See the note in
+	// requestWithRedirects — sharing a Request across goroutines would otherwise
+	// race with concurrent map writes (fatal, and silent across cgo).
+	reqCopy := *req
+	reqCopy.Headers = cloneHeaders(req.Headers)
+	req = &reqCopy
+
 	s.mu.Lock()
 	if !s.active {
 		s.mu.Unlock()
@@ -1914,9 +2098,28 @@ func (s *Session) Marshal() ([]byte, error) {
 		Cookies:     cookies,
 		TLSSessions: tlsSessions,
 		ECHConfigs:  echConfigs,
+		TLSVerify:   tlsVerifyStateOf(config),
 	}
 
 	return json.MarshalIndent(state, "", "  ")
+}
+
+// tlsVerifyStateOf records which verification hooks a config carries. Returns
+// nil when it carries none, so the key stays out of the file entirely for the
+// common case.
+func tlsVerifyStateOf(config *protocol.SessionConfig) *TLSVerifyState {
+	if config == nil {
+		return nil
+	}
+	v := &TLSVerifyState{
+		PeerCertificate: config.TLSVerifyPeerCertificate != nil,
+		Connection:      config.TLSVerifyConnection != nil,
+		RootCAs:         config.TLSRootCAs != nil,
+	}
+	if !v.PeerCertificate && !v.Connection && !v.RootCAs {
+		return nil
+	}
+	return v
 }
 
 // Save exports session state to a file
@@ -1934,14 +2137,74 @@ func (s *Session) Save(path string) error {
 	return nil
 }
 
-// LoadSession loads a session from a file
+// SessionLoadOptions supplies the parts of a session's configuration that JSON
+// cannot carry.
+//
+// Certificate verification hooks are Go functions and a *x509.CertPool, so a
+// saved session can only record THAT they were configured, never what they did.
+// Pass the same ones here to restore the session with the posture it was saved
+// with. Anything left nil here that the file recorded is an error, not a
+// silent downgrade.
+type SessionLoadOptions struct {
+	TLSVerifyPeerCertificate func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
+	TLSVerifyConnection      func(cs tls.ConnectionState) error
+	TLSRootCAs               *x509.CertPool
+}
+
+// applyTo installs the supplied hooks on the config the session will be built
+// from, so they travel the same path as hooks passed to NewSession directly.
+func (o *SessionLoadOptions) applyTo(config *protocol.SessionConfig) {
+	if o == nil || config == nil {
+		return
+	}
+	if o.TLSVerifyPeerCertificate != nil {
+		config.TLSVerifyPeerCertificate = o.TLSVerifyPeerCertificate
+	}
+	if o.TLSVerifyConnection != nil {
+		config.TLSVerifyConnection = o.TLSVerifyConnection
+	}
+	if o.TLSRootCAs != nil {
+		config.TLSRootCAs = o.TLSRootCAs
+	}
+}
+
+// missingFrom names the recorded hooks the options do not supply.
+func (v *TLSVerifyState) missingFrom(o *SessionLoadOptions) []string {
+	if v == nil {
+		return nil
+	}
+	var missing []string
+	if v.PeerCertificate && (o == nil || o.TLSVerifyPeerCertificate == nil) {
+		missing = append(missing, "TLSVerifyPeerCertificate")
+	}
+	if v.Connection && (o == nil || o.TLSVerifyConnection == nil) {
+		missing = append(missing, "TLSVerifyConnection")
+	}
+	if v.RootCAs && (o == nil || o.TLSRootCAs == nil) {
+		missing = append(missing, "TLSRootCAs")
+	}
+	return missing
+}
+
+// LoadSession loads a session from a file.
+//
+// Fails if the saved session had certificate verification hooks configured,
+// because those cannot be serialised and restoring without them would hand back
+// a session that verifies less than the one that was saved. Use
+// LoadSessionWithOptions to supply them.
 func LoadSession(path string) (*Session, error) {
+	return LoadSessionWithOptions(path, nil)
+}
+
+// LoadSessionWithOptions loads a session from a file, re-supplying the parts of
+// its configuration that JSON cannot carry.
+func LoadSessionWithOptions(path string, opts *SessionLoadOptions) (*Session, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session file: %w", err)
 	}
 
-	return UnmarshalSession(data)
+	return UnmarshalSessionWithOptions(data, opts)
 }
 
 // sessionStateV3 represents the old v3 session format for backwards compatibility
@@ -1960,11 +2223,21 @@ type sessionStateV3 struct {
 	UDPProxy        string                               `json:"udp_proxy,omitempty"`
 }
 
-// UnmarshalSession loads a session from JSON bytes
+// UnmarshalSession loads a session from JSON bytes.
+//
+// Fails if the saved session had certificate verification hooks configured. See
+// LoadSession.
 func UnmarshalSession(data []byte) (*Session, error) {
-	// First, check the version
+	return UnmarshalSessionWithOptions(data, nil)
+}
+
+// UnmarshalSessionWithOptions loads a session from JSON bytes, re-supplying the
+// parts of its configuration that JSON cannot carry.
+func UnmarshalSessionWithOptions(data []byte, opts *SessionLoadOptions) (*Session, error) {
+	// First, check the version and what the file says about verification
 	var versionCheck struct {
-		Version int `json:"version"`
+		Version   int             `json:"version"`
+		TLSVerify *TLSVerifyState `json:"tls_verify"`
 	}
 	if err := json.Unmarshal(data, &versionCheck); err != nil {
 		return nil, fmt.Errorf("failed to parse session data: %w", err)
@@ -1975,14 +2248,24 @@ func UnmarshalSession(data []byte) (*Session, error) {
 			versionCheck.Version, SessionStateVersion)
 	}
 
+	// Fail closed. Restoring a session whose verification hooks were dropped
+	// gives back something that accepts certificates the saved session would
+	// have rejected, with nothing at any layer to say so.
+	if missing := versionCheck.TLSVerify.missingFrom(opts); len(missing) > 0 {
+		return nil, fmt.Errorf("session was saved with certificate verification configured (%s) and "+
+			"those cannot be serialised; load it with LoadSessionWithOptions/UnmarshalSessionWithOptions "+
+			"and pass the same hooks, otherwise the restored session would verify less than the one you saved",
+			strings.Join(missing, ", "))
+	}
+
 	// Handle v3 format (backwards compatibility)
 	if versionCheck.Version <= 3 {
-		return unmarshalSessionV3(data)
+		return unmarshalSessionV3(data, opts)
 	}
 
 	// Handle v4 format (flat cookie list)
 	if versionCheck.Version == 4 {
-		return unmarshalSessionV4(data)
+		return unmarshalSessionV4(data, opts)
 	}
 
 	// Handle v5 format (domain-keyed cookies)
@@ -1998,6 +2281,7 @@ func UnmarshalSession(data []byte) (*Session, error) {
 			Preset: "chrome-146",
 		}
 	}
+	opts.applyTo(config)
 
 	session := NewSession("", config)
 	session.CreatedAt = state.CreatedAt
@@ -2020,7 +2304,7 @@ func UnmarshalSession(data []byte) (*Session, error) {
 }
 
 // unmarshalSessionV4 handles loading v4 format sessions (flat cookie list)
-func unmarshalSessionV4(data []byte) (*Session, error) {
+func unmarshalSessionV4(data []byte, opts *SessionLoadOptions) (*Session, error) {
 	var state SessionStateV4
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("failed to parse v4 session data: %w", err)
@@ -2033,6 +2317,7 @@ func unmarshalSessionV4(data []byte) (*Session, error) {
 			Preset: "chrome-146",
 		}
 	}
+	opts.applyTo(config)
 
 	session := NewSession("", config)
 	session.CreatedAt = state.CreatedAt
@@ -2054,7 +2339,7 @@ func unmarshalSessionV4(data []byte) (*Session, error) {
 }
 
 // unmarshalSessionV3 handles loading old v3 format sessions
-func unmarshalSessionV3(data []byte) (*Session, error) {
+func unmarshalSessionV3(data []byte, opts *SessionLoadOptions) (*Session, error) {
 	var state sessionStateV3
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("failed to parse v3 session data: %w", err)
@@ -2069,6 +2354,7 @@ func unmarshalSessionV3(data []byte) (*Session, error) {
 		TCPProxy:        state.TCPProxy,
 		UDPProxy:        state.UDPProxy,
 	}
+	opts.applyTo(config)
 
 	session := NewSession("", config)
 	session.CreatedAt = state.CreatedAt

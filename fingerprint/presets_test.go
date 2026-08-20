@@ -96,8 +96,12 @@ func int64Ptr(v int64) *int64     { return &v }
 func TestH2HeaderOrderDefault(t *testing.T) {
 	p := Chrome146()
 	order := p.H2HeaderOrder()
-	if len(order) != 19 {
-		t.Fatalf("expected 19 headers in Chrome default order, got %d", len(order))
+	// 27 = base Chrome order + the high-entropy UA client hints (sec-ch-ua-arch,
+	// -bitness, -full-version-list, -model, -platform-version, -wow64) and the
+	// conditional-cache validators (if-none-match, if-modified-since) the session
+	// injects. They live in the HPACK table so the wire order stays deterministic.
+	if len(order) != 27 {
+		t.Fatalf("expected 27 headers in Chrome default order, got %d", len(order))
 	}
 	if order[0] != "cache-control" {
 		t.Fatalf("expected first header 'cache-control', got %q", order[0])
@@ -130,12 +134,18 @@ func TestH2HPACKIndexingPolicyCustom(t *testing.T) {
 	}
 }
 
+// Chrome never emits the never-indexed representation. This used to default to
+// {cookie, authorization, proxy-authorization}, which reads as hardening and is
+// really a fingerprint: quiche's HpackEncoder indexes every regular header,
+// those three included, so a cookie crumb went out as 0x1f11 where Chrome sends
+// 0x60. Because a never-indexed field is never inserted, the whole jar was also
+// re-sent in full on every request, ~880 bytes against Chrome's ~35.
 func TestH2HPACKNeverIndexDefault(t *testing.T) {
 	p := Chrome146()
-	ni := p.H2HPACKNeverIndex()
-	expected := []string{"cookie", "authorization", "proxy-authorization"}
-	if !reflect.DeepEqual(ni, expected) {
-		t.Fatalf("expected %v, got %v", expected, ni)
+	if ni := p.H2HPACKNeverIndex(); len(ni) != 0 {
+		t.Fatalf("Chrome sends no never-indexed headers; got %v. Listing cookie or "+
+			"authorization here changes the HPACK instruction on the wire and stops "+
+			"the dynamic table from ever being used for them", ni)
 	}
 }
 
@@ -593,15 +603,22 @@ func TestAndroidChromeH2Config(t *testing.T) {
 func TestChromeH2ConfigNoRegression(t *testing.T) {
 	p := Chrome146()
 	order := p.H2HeaderOrder()
-	if len(order) != 19 || order[0] != "cache-control" {
+	if len(order) != 27 || order[0] != "cache-control" {
 		t.Fatalf("Chrome HPACK order regression: got %d headers, first=%q", len(order), order[0])
+	}
+	// Lockstep lock: the nil-H2Config fallback (H2HeaderOrder) must stay
+	// byte-for-byte identical to the explicit chromeH2Config().HPACKHeaderOrder,
+	// otherwise the two paths emit the injected client hints in different wire
+	// orders — a fingerprint tell. presets.go promises they are kept in lockstep.
+	fallback := (&Preset{Name: "bare"}).H2HeaderOrder()
+	if !reflect.DeepEqual(order, fallback) {
+		t.Fatalf("Chrome H2 order drift: H2Config path %v != nil-fallback %v", order, fallback)
 	}
 	if p.H2HPACKIndexingPolicy() != "chrome" {
 		t.Fatalf("Chrome indexing policy regression: got %q", p.H2HPACKIndexingPolicy())
 	}
-	ni := p.H2HPACKNeverIndex()
-	if len(ni) != 3 {
-		t.Fatalf("Chrome never-index regression: expected 3, got %d", len(ni))
+	if ni := p.H2HPACKNeverIndex(); len(ni) != 0 {
+		t.Fatalf("Chrome never-index regression: expected none, got %v", ni)
 	}
 	if p.H2StreamPriorityMode() != "chrome" {
 		t.Fatalf("Chrome priority mode regression: got %q", p.H2StreamPriorityMode())
@@ -634,14 +651,14 @@ func TestAllPresetsHaveH2Config(t *testing.T) {
 func TestH2GettersWithNilConfig(t *testing.T) {
 	p := &Preset{Name: "bare"}
 	// All should return Chrome defaults without panicking
-	if len(p.H2HeaderOrder()) != 19 {
-		t.Fatal("expected 19 element Chrome header order")
+	if len(p.H2HeaderOrder()) != 27 {
+		t.Fatal("expected 27 element Chrome header order")
 	}
 	if p.H2HPACKIndexingPolicy() != "chrome" {
 		t.Fatal("expected 'chrome'")
 	}
-	if len(p.H2HPACKNeverIndex()) != 3 {
-		t.Fatal("expected 3 never-index headers")
+	if len(p.H2HPACKNeverIndex()) != 0 {
+		t.Fatal("expected no never-index headers: Chrome does not use that representation")
 	}
 	if p.H2StreamPriorityMode() != "chrome" {
 		t.Fatal("expected 'chrome'")

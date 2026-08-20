@@ -4,6 +4,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	http "github.com/sardanioss/http"
@@ -20,7 +22,6 @@ import (
 	"github.com/sardanioss/httpcloak/proxy"
 	"github.com/sardanioss/quic-go"
 	"github.com/sardanioss/quic-go/http3"
-	"github.com/sardanioss/quic-go/quicvarint"
 	"github.com/sardanioss/udpbara"
 	tls "github.com/sardanioss/utls"
 	utls "github.com/sardanioss/utls"
@@ -35,18 +36,15 @@ const (
 )
 
 // QUIC transport parameter IDs (Chrome-specific)
+//
+// Only the two below are actually sent. Chrome was previously also credited
+// with google_version (0x4752 / 18258) and initial_rtt (0x3127 / 12583), but a
+// real Chrome 151 QUIC capture sends neither: its ClientHello carries exactly
+// 1, 3, 4, 5, 6, 7, 8, 9, 15, 17, 32, 12584 and one GREASE parameter. Sending
+// the extra two was a fingerprint mismatch on every Chrome H3 request.
 const (
-	tpVersionInformation = 0x11   // RFC 9368 version negotiation
-	tpGoogleVersion      = 0x4752 // Google's custom version param (18258)
-	tpInitialRTT              = 0x3127 // initial_rtt (12583) - Chrome's cached SRTT
+	tpVersionInformation      = 0x11   // RFC 9368 version negotiation
 	tpGoogleConnectionOptions = 0x3128 // Google's connection options param (12584)
-)
-
-// RTT measurement state — measure once per process, re-measure after ResetInitialRTT().
-var (
-	rttMu          sync.Mutex
-	rttMeasured    bool
-	cachedRTTParams map[uint64][]byte // cached Chrome params with measured RTT
 )
 
 // BuildChromeTransportParams creates Chrome-like QUIC transport parameters.
@@ -67,12 +65,6 @@ func BuildChromeTransportParams() map[uint64][]byte {
 	versionInfo = binary.BigEndian.AppendUint32(versionInfo, 0x00000001)
 	params[tpVersionInformation] = versionInfo
 
-	// google_version (0x4752 / 18258) - Google's custom parameter
-	// Format: 4-byte version
-	googleVersion := make([]byte, 4)
-	binary.BigEndian.PutUint32(googleVersion, 0x00000001) // QUICv1
-	params[tpGoogleVersion] = googleVersion
-
 	// google_connection_options (0x3128 / 12584) - 4-byte QUIC tag(s).
 	// Stable Chrome ships with kQuicOptions default "ORIG" (origin-frame
 	// experiment hint), per Chromium net/base/features.cc:
@@ -83,12 +75,6 @@ func BuildChromeTransportParams() map[uint64][]byte {
 	// override, which is rare on the open web — bot fingerprinters flag it.
 	params[tpGoogleConnectionOptions] = []byte("ORIG")
 
-	// initial_rtt (0x3127) - Chrome sends cached SRTT in microseconds
-	// Default 100ms (100000us); MeasureInitialRTT overrides with real RTT
-	initialRTT := make([]byte, 0, 8)
-	initialRTT = quicvarint.Append(initialRTT, 100000) // 100ms fallback
-	params[tpInitialRTT] = initialRTT
-
 	// Note: GREASE transport param is NOT added here — quic-go's Chrome-mode
 	// marshaling (transport_parameters.go) already inserts exactly 1 GREASE param
 	// at the correct position (after max_datagram_frame_size).
@@ -96,78 +82,84 @@ func BuildChromeTransportParams() map[uint64][]byte {
 	return params
 }
 
-// MeasureInitialRTT measures TCP RTT to host:port and returns Chrome transport
-// params with the measured RTT. Called once per process (cached); subsequent
-// calls return the cached params. If measurement fails, returns params with
-// default 100ms RTT.
-func MeasureInitialRTT(ctx context.Context, host string, port int) map[uint64][]byte {
-	rttMu.Lock()
-	defer rttMu.Unlock()
-	if rttMeasured {
-		return cachedRTTParams
-	}
-	rttMeasured = true
-
-	// Start with default Chrome params (100ms RTT)
-	cachedRTTParams = BuildChromeTransportParams()
-
-	// Quick TCP SYN-ACK RTT probe (connect + immediate close)
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	start := time.Now()
-	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(probeCtx, "tcp", addr)
-	rtt := time.Since(start)
-	if conn != nil {
-		conn.Close()
-	}
-	if err != nil {
-		return cachedRTTParams // keep default 100ms
-	}
-
-	// Update with measured RTT
-	rttValue := make([]byte, 0, 8)
-	rttValue = quicvarint.Append(rttValue, uint64(rtt.Microseconds()))
-	cachedRTTParams[tpInitialRTT] = rttValue
-	return cachedRTTParams
+// MeasureInitialRTT returns the Chrome QUIC transport parameter set.
+//
+// Deprecated: this used to open a throwaway TCP connection to the target purely
+// to time the SYN-ACK, so the round-trip could be sent as Chrome's initial_rtt
+// (0x3127) transport parameter. Real Chrome sends no such parameter, so it has
+// been dropped, and with it the probe: a stray TCP connect to the origin ahead
+// of an HTTP/3 request was itself an observable tell. The function is kept so
+// existing callers keep compiling, and now simply returns the standard Chrome
+// parameters without touching the network.
+func MeasureInitialRTT(_ context.Context, _ string, _ int) map[uint64][]byte {
+	return BuildChromeTransportParams()
 }
 
-// MeasureAndSetInitialRTT measures TCP RTT and sets the global transport params.
-// Deprecated: Use MeasureInitialRTT and pass params via quic.Config.AdditionalTransportParameters instead.
-func MeasureAndSetInitialRTT(ctx context.Context, host string, port int) {
-	params := MeasureInitialRTT(ctx, host, port)
-	quic.SetAdditionalTransportParameters(params)
+// MeasureAndSetInitialRTT sets the global Chrome transport params.
+//
+// Deprecated: pass params via quic.Config.AdditionalTransportParameters
+// instead. No RTT is measured; see MeasureInitialRTT.
+func MeasureAndSetInitialRTT(_ context.Context, _ string, _ int) {
+	// Deliberately does nothing. It used to publish Chrome's transport
+	// parameters into a PROCESS-GLOBAL set, which every connection in the
+	// process then inherited regardless of which browser it was impersonating.
+	// One call was enough to put Google-specific parameters on every Firefox and
+	// Safari connection for the life of the process. Per-connection parameters
+	// are selected from the preset now; see AdditionalTransportParamsForPreset.
 }
 
-// ResetInitialRTT allows re-measurement for new sessions/hosts.
-func ResetInitialRTT() {
-	rttMu.Lock()
-	defer rttMu.Unlock()
-	rttMeasured = false
-	cachedRTTParams = nil
-}
+// ResetInitialRTT is a no-op.
+//
+// Deprecated: there is no cached RTT state to reset any more; see
+// MeasureInitialRTT.
+func ResetInitialRTT() {}
 
-// AdditionalTransportParamsForPreset returns per-connection additional QUIC transport
-// params appropriate for the given preset. For Chrome presets, returns Chrome-specific
-// params (google_connection_options, google_version, version_information, initial_rtt).
-// For non-Chrome presets (e.g. Firefox), returns nil so these Chrome-specific params
-// are not sent. If ctx/host/port are provided and the preset is Chrome, includes
-// measured RTT; otherwise uses default 100ms.
-func AdditionalTransportParamsForPreset(preset *fingerprint.Preset, ctx context.Context, host string, port int) map[uint64][]byte {
+// AdditionalTransportParamsForPreset returns per-connection additional QUIC
+// transport params appropriate for the given preset. For Chrome presets that is
+// version_information (0x11) and google_connection_options (0x3128). For
+// non-Chrome presets (e.g. Firefox) it returns nil so these Chrome-specific
+// params are not sent.
+//
+// The ctx/host/port parameters are unused and retained for API compatibility;
+// they previously drove the initial_rtt probe.
+func AdditionalTransportParamsForPreset(preset *fingerprint.Preset, _ context.Context, _ string, _ int) map[uint64][]byte {
 	if preset == nil {
 		return nil
 	}
-	order := preset.H3QUICTransportParamOrder()
-	if order != "chrome" {
-		return nil
-	}
-	// For Chrome presets, measure RTT and return Chrome params
-	if ctx != nil && host != "" && port > 0 {
-		return MeasureInitialRTT(ctx, host, port)
+	if !presetIsChromeQUIC(preset) {
+		// Empty, NOT nil. quic-go treats a nil additional-parameter map as "fall
+		// back to the process-global set", and MeasureAndSetInitialRTT writes
+		// Chrome's parameters into exactly that global. Returning nil here would
+		// therefore let one call to a deprecated helper put Chrome's
+		// browser-specific parameters back on every non-Chrome profile, for the
+		// life of the process, silently undoing this gate.
+		return map[uint64][]byte{}
 	}
 	return BuildChromeTransportParams()
+}
+
+// presetIsChromeQUIC reports whether a preset impersonates a Chromium-based
+// client on QUIC, and so should carry Chrome's browser-specific transport
+// parameters (version_information and google_connection_options).
+//
+// This deliberately does NOT key off H3QUICTransportParamOrder(). That field
+// selects how the parameters are ORDERED and defaults to "chrome" for any
+// preset that does not set it, so using it as an identity test made every
+// non-Chrome preset advertise Google-only parameters: a Firefox-shaped
+// ClientHello carrying google_connection_options is a flat contradiction to
+// anyone reading the handshake, which is precisely the tell this library exists
+// to avoid.
+//
+// The QUIC ClientHello identity is the honest signal. It is "Chrome" for the
+// desktop and Android Chrome presets, and something else (or empty) for
+// Firefox, Safari and the WebKit-based iOS Chrome presets, which really do not
+// send these.
+func presetIsChromeQUIC(preset *fingerprint.Preset) bool {
+	if preset.QUICClientHelloID.Client != "" {
+		return preset.QUICClientHelloID.Client == "Chrome"
+	}
+	// No QUIC-specific identity: fall back to the TCP one rather than assuming.
+	return preset.ClientHelloID.Client == "Chrome"
 }
 
 // generateGREASEVersion generates a GREASE version of form 0x?a?a?a?a
@@ -226,13 +218,22 @@ type HTTP3Transport struct {
 	dialCount    int64 // Number of times dialQUIC was called (new connections)
 	mu           sync.RWMutex
 
+	// ipv4FirstOverride transiently forces the Happy-Eyeballs QUIC dial to lead
+	// with IPv4 regardless of the DNS cache's PreferIPv4 knob. doHTTP3 sets it for
+	// a single redial after a forced-H3 roundtrip stalls on a path that completed
+	// its QUIC handshake but then blackholes application data (the IPv6 PMTU
+	// black-hole case), so the retry avoids the dead family. Reset right after.
+	ipv4FirstOverride atomic.Bool
+
 	// Configuration
 	quicConfig *quic.Config
 	tlsConfig  *tls.Config
 
 	// Proxy support for SOCKS5 UDP relay via udpbara
 	proxyConfig   *ProxyConfig
-	udpbaraTunnel *udpbara.Tunnel // SOCKS5 UDP relay tunnel (shared across dials)
+	usesUDPProxy  bool            // true when configured for a SOCKS5 UDP relay (drives dialFunc selection before the tunnel is connected)
+	udpbaraTunnel *udpbara.Tunnel // SOCKS5 UDP relay tunnel (shared across dials; connected lazily on first H3 dial)
+	udpbaraMu     sync.Mutex      // guards lazy connect of udpbaraTunnel
 	proxyConns    []*proxyQUICConn
 	proxyConnsMu  sync.Mutex
 	quicTransport *quic.Transport // Only used for direct connections
@@ -255,6 +256,7 @@ type HTTP3Transport struct {
 
 	// Skip TLS certificate verification (for testing)
 	insecureSkipVerify bool
+	tlsVerify          *TLSVerify
 
 	// Skip ECH lookup for faster first request (ECH is optional privacy feature)
 	disableECH bool
@@ -264,6 +266,48 @@ type HTTP3Transport struct {
 }
 
 // SetInsecureSkipVerify sets whether to skip TLS certificate verification
+// SetTLSVerify installs caller-supplied certificate verification hooks.
+// Only verification is configurable; nothing here affects the ClientHello.
+func (t *HTTP3Transport) SetTLSVerify(v *TLSVerify) {
+	t.tlsVerify = v
+	// Unlike HTTP/1.1 and HTTP/2, which build a fresh utls.Config per
+	// connection and therefore pick this up at dial time, HTTP/3 builds
+	// t.tlsConfig ONCE in the constructor - before this setter can ever run.
+	// Recording the field without re-applying it would leave the cached config
+	// without the hooks, so certificate verification would silently never run
+	// on QUIC. That fails open: a callback that is never consulted never
+	// rejects, and on a client that prefers HTTP/3 that is the connection the
+	// request actually uses.
+	if t.tlsConfig != nil {
+		v.Apply(t.tlsConfig)
+	}
+}
+
+// Preset returns the profile new connections are built from.
+func (t *HTTP3Transport) Preset() *fingerprint.Preset { return t.preset }
+
+// SetPreset swaps the browser profile used for subsequent connections.
+//
+// The cached TLS config and ClientHello spec were both derived from the old
+// profile, so they are rebuilt; otherwise a profile switch would keep dialling
+// with the previous browser's ClientHello.
+func (t *HTTP3Transport) SetPreset(preset *fingerprint.Preset) {
+	if preset == nil {
+		return
+	}
+	t.preset = preset
+	if id := preset.QUICClientHelloID; id.Client != "" {
+		t.clientHelloID = &id
+	}
+	t.cachedClientHelloSpec = t.getSpecForHost("")
+	t.Refresh()
+}
+
+// TLSVerify returns the installed verification hooks, or nil.
+func (t *HTTP3Transport) TLSVerify() *TLSVerify {
+	return t.tlsVerify
+}
+
 func (t *HTTP3Transport) SetInsecureSkipVerify(skip bool) {
 	t.insecureSkipVerify = skip
 	if t.tlsConfig != nil {
@@ -309,13 +353,13 @@ func (t *HTTP3Transport) hasSessionForHost(host string) bool {
 // early_data on a fresh connection.
 func (t *HTTP3Transport) getSpecForHost(host string) *utls.ClientHelloSpec {
 	if t.preset.QUICPSKClientHelloID.Client != "" && t.hasSessionForHost(host) {
-		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.QUICPSKClientHelloID, t.shuffleSeed); err == nil {
-			return &spec
+		if spec, err := fingerprint.SpecFor(t.preset.QUICPSKClientHelloID, t.shuffleSeed, t.preset.QUICSignatureAlgorithms); err == nil {
+			return spec
 		}
 	}
 	if t.clientHelloID != nil {
-		if spec, err := utls.UTLSIdToSpecWithSeed(*t.clientHelloID, t.shuffleSeed); err == nil {
-			return &spec
+		if spec, err := fingerprint.SpecFor(*t.clientHelloID, t.shuffleSeed, t.preset.QUICSignatureAlgorithms); err == nil {
+			return spec
 		}
 	}
 	return nil
@@ -326,13 +370,13 @@ func (t *HTTP3Transport) getSpecForHost(host string) *utls.ClientHelloSpec {
 // kept a separate object from the outer connection for a consistent inner JA4.
 func (t *HTTP3Transport) getInnerSpecForHost(host string) *utls.ClientHelloSpec {
 	if t.preset.QUICPSKClientHelloID.Client != "" && t.hasSessionForHost(host) {
-		if spec, err := utls.UTLSIdToSpecWithSeed(t.preset.QUICPSKClientHelloID, t.shuffleSeed); err == nil {
-			return &spec
+		if spec, err := fingerprint.SpecFor(t.preset.QUICPSKClientHelloID, t.shuffleSeed, t.preset.QUICSignatureAlgorithms); err == nil {
+			return spec
 		}
 	}
 	if t.clientHelloID != nil {
-		if spec, err := utls.UTLSIdToSpecWithSeed(*t.clientHelloID, t.shuffleSeed); err == nil {
-			return &spec
+		if spec, err := fingerprint.SpecFor(*t.clientHelloID, t.shuffleSeed, t.preset.QUICSignatureAlgorithms); err == nil {
+			return spec
 		}
 	}
 	return nil
@@ -390,6 +434,7 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 	if clientHelloID != nil {
 		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
 		if err == nil {
+			fingerprint.ApplySignatureAlgorithms(spec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpec = &spec
 		}
 	}
@@ -398,6 +443,7 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 	// Chrome uses a different TLS extension set when resuming with PSK
 	if preset.QUICPSKClientHelloID.Client != "" {
 		if pskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, shuffleSeed); err == nil {
+			fingerprint.ApplySignatureAlgorithms(pskSpec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpecPSK = &pskSpec
 		}
 	}
@@ -419,6 +465,7 @@ func NewHTTP3TransportWithTransportConfig(preset *fingerprint.Preset, dnsCache *
 		InsecureSkipVerify: t.insecureSkipVerify,
 		KeyLogWriter:       keyLogWriter,
 	}
+	t.tlsVerify.Apply(t.tlsConfig)
 	if t.cachedClientHelloSpecPSK != nil {
 		t.tlsConfig.ClientSessionCache = t.sessionCache
 	}
@@ -545,6 +592,7 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 	if clientHelloID != nil {
 		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
 		if err == nil {
+			fingerprint.ApplySignatureAlgorithms(spec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpec = &spec
 		}
 	}
@@ -552,6 +600,7 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 	// Also cache the PSK spec for session resumption (includes pre_shared_key extension)
 	if preset.QUICPSKClientHelloID.Client != "" {
 		if pskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, shuffleSeed); err == nil {
+			fingerprint.ApplySignatureAlgorithms(pskSpec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpecPSK = &pskSpec
 		}
 	}
@@ -573,6 +622,7 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		InsecureSkipVerify: t.insecureSkipVerify,
 		KeyLogWriter:       keyLogWriter,
 	}
+	t.tlsVerify.Apply(t.tlsConfig)
 	if t.cachedClientHelloSpecPSK != nil {
 		t.tlsConfig.ClientSessionCache = t.sessionCache
 	}
@@ -586,20 +636,15 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 	// Build QUIC config from preset getters (0 = use preset default for InitialPacketSize)
 	t.quicConfig = t.buildQUICConfig(clientHelloID, quicIdleTimeout, 0)
 
-	// Set up SOCKS5 UDP relay via udpbara if proxy is configured
-	// udpbara creates local UDP socket pairs so quic-go gets real *net.UDPConn with OOB/ECN support
+	// Mark this transport as a SOCKS5 UDP relay when a proxy is configured. The
+	// udpbara tunnel itself is connected lazily on the first H3 dial (see
+	// ensureUDPTunnel) rather than here. Connecting at construction made
+	// NewSession do blocking network I/O against the proxy — a stalling proxy
+	// hung session creation indefinitely, and it ran even for forced-H1/H2
+	// sessions that never touch H3. Lazy connect keeps construction instant and
+	// bounds the connect by the dial's own context.
 	if proxyConfig != nil && proxyConfig.URL != "" {
-		tunnel, err := udpbara.NewTunnel(proxyConfig.URL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SOCKS5 tunnel: %w", err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := tunnel.ConnectContext(ctx); err != nil {
-			tunnel.Close()
-			return nil, fmt.Errorf("SOCKS5 proxy does not support UDP relay (required for HTTP/3): %w", err)
-		}
-		t.udpbaraTunnel = tunnel
+		t.usesUDPProxy = true
 		// Note: quicTransport is NOT created here — each dial creates its own per-connection
 	}
 
@@ -608,7 +653,7 @@ func NewHTTP3TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 
 	// Create HTTP/3 transport with appropriate dial function
 	var dialFunc func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error)
-	if t.udpbaraTunnel != nil {
+	if t.usesUDPProxy {
 		dialFunc = t.dialQUICWithProxy
 	} else {
 		dialFunc = t.dialQUIC
@@ -669,12 +714,14 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 	if clientHelloID != nil {
 		spec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
 		if err == nil {
+			fingerprint.ApplySignatureAlgorithms(spec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpec = &spec
 		}
 		// Create separate cached spec for inner connections (not shared with outer)
 		// This ensures JA4 hash is consistent across inner requests
 		innerSpec, err := utls.UTLSIdToSpecWithSeed(*clientHelloID, shuffleSeed)
 		if err == nil {
+			fingerprint.ApplySignatureAlgorithms(innerSpec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpecInner = &innerSpec
 		}
 	}
@@ -683,10 +730,12 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 	if preset.QUICPSKClientHelloID.Client != "" {
 		// Outer PSK spec
 		if pskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, shuffleSeed); err == nil {
+			fingerprint.ApplySignatureAlgorithms(pskSpec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpecPSK = &pskSpec
 		}
 		// Inner PSK spec for MASQUE connections
 		if innerPskSpec, err := utls.UTLSIdToSpecWithSeed(preset.QUICPSKClientHelloID, shuffleSeed); err == nil {
+			fingerprint.ApplySignatureAlgorithms(innerPskSpec.Extensions, preset.QUICSignatureAlgorithms)
 			t.cachedClientHelloSpecInnerPSK = &innerPskSpec
 		}
 	}
@@ -708,6 +757,7 @@ func NewHTTP3TransportWithMASQUE(preset *fingerprint.Preset, dnsCache *dns.Cache
 		InsecureSkipVerify: t.insecureSkipVerify,
 		KeyLogWriter:       keyLogWriter,
 	}
+	t.tlsVerify.Apply(t.tlsConfig)
 	if t.cachedClientHelloSpecPSK != nil {
 		t.tlsConfig.ClientSessionCache = t.sessionCache
 	}
@@ -826,31 +876,86 @@ func (t *HTTP3Transport) dialQUICWithMASQUE(ctx context.Context, addr string, tl
 	keepAlivePeriod := quicIdleTimeout / 2
 
 	cfgCopy := &quic.Config{
-		MaxIdleTimeout:                  quicIdleTimeout,
-		KeepAlivePeriod:                 keepAlivePeriod,
-		MaxIncomingStreams:              t.preset.H3QUICMaxIncomingStreams(),
-		MaxIncomingUniStreams:           t.preset.H3QUICMaxIncomingUniStreams(),
-		Allow0RTT:                       t.preset.H3QUICAllow0RTT(),
-		EnableDatagrams:                 true,  // Always true at QUIC level
-		InitialPacketSize:               1200,  // MASQUE inner constraint (not fingerprint)
-		DisablePathMTUDiscovery:         true,  // MASQUE tunnel constraint
-		DisableClientHelloScrambling:    t.preset.H3QUICDisableHelloScramble(),
-		InitialStreamReceiveWindow:      512 * 1024,            // MASQUE flow control
-		MaxStreamReceiveWindow:          6 * 1024 * 1024,       // MASQUE flow control
-		InitialConnectionReceiveWindow:  15 * 1024 * 1024 / 2,  // MASQUE flow control
-		MaxConnectionReceiveWindow:      15 * 1024 * 1024,      // MASQUE flow control
-		TransportParameterOrder:         resolveTransportParamOrder(t.preset.H3QUICTransportParamOrder()),
-		TransportParameterShuffleSeed:   t.shuffleSeed,
-		ClientHelloID:                   clientHelloID,
-		CachedClientHelloSpec:           innerSpec, // Separate spec for consistent JA4, uses PSK for resumed
-		ECHConfigList:                   echConfigList,
-		AdditionalTransportParameters:   AdditionalTransportParamsForPreset(t.preset, nil, "", 0),
-		MaxDatagramFrameSize:            t.preset.H3QUICMaxDatagramFrameSize(),
+		MaxIdleTimeout:                 quicIdleTimeout,
+		KeepAlivePeriod:                keepAlivePeriod,
+		MaxIncomingStreams:             t.preset.H3QUICMaxIncomingStreams(),
+		MaxIncomingUniStreams:          t.preset.H3QUICMaxIncomingUniStreams(),
+		Allow0RTT:                      t.preset.H3QUICAllow0RTT(),
+		EnableDatagrams:                true, // Always true at QUIC level
+		InitialPacketSize:              1200, // MASQUE inner constraint (not fingerprint)
+		DisablePathMTUDiscovery:        true, // MASQUE tunnel constraint
+		DisableClientHelloScrambling:   t.preset.H3QUICDisableHelloScramble(),
+		InitialStreamReceiveWindow:     512 * 1024,           // MASQUE flow control
+		MaxStreamReceiveWindow:         6 * 1024 * 1024,      // MASQUE flow control
+		InitialConnectionReceiveWindow: 15 * 1024 * 1024 / 2, // MASQUE flow control
+		MaxConnectionReceiveWindow:     15 * 1024 * 1024,     // MASQUE flow control
+		TransportParameterOrder:        resolveTransportParamOrder(t.preset.H3QUICTransportParamOrder()),
+		TransportParameterShuffleSeed:  t.shuffleSeed,
+		ClientHelloID:                  clientHelloID,
+		CachedClientHelloSpec:          innerSpec, // Separate spec for consistent JA4, uses PSK for resumed
+		ECHConfigList:                  echConfigList,
+		AdditionalTransportParameters:  AdditionalTransportParamsForPreset(t.preset, nil, "", 0),
+		MaxDatagramFrameSize:           t.preset.H3QUICMaxDatagramFrameSize(),
 	}
 
 	// Dial QUIC over the MASQUE tunnel using quic.DialEarly for 0-RTT support
 	// This properly supports ECH, unlike quic.Transport.Dial
 	return quic.DialEarly(ctx, t.masqueConn, targetAddr, tlsCfgCopy, cfgCopy)
+}
+
+// ensureUDPTunnel returns the SOCKS5 UDP relay tunnel, connecting it on first
+// use. The connect is deferred out of construction so NewSession never blocks on
+// proxy network I/O; it happens here, on the first H3 dial, bounded by the dial's
+// context. A failed connect is not cached — the next dial retries, so a transient
+// proxy hiccup at session start does not permanently disable H3.
+func (t *HTTP3Transport) ensureUDPTunnel(ctx context.Context) (*udpbara.Tunnel, error) {
+	t.udpbaraMu.Lock()
+	defer t.udpbaraMu.Unlock()
+
+	if t.udpbaraTunnel != nil {
+		return t.udpbaraTunnel, nil
+	}
+	if t.proxyConfig == nil || t.proxyConfig.URL == "" {
+		return nil, fmt.Errorf("no SOCKS5 proxy configured for UDP relay")
+	}
+
+	tunnel, err := udpbara.NewTunnel(t.proxyConfig.URL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SOCKS5 tunnel: %w", err)
+	}
+	if err := connectTunnelBounded(ctx, tunnel, 15*time.Second); err != nil {
+		tunnel.Close()
+		return nil, fmt.Errorf("SOCKS5 proxy does not support UDP relay (required for HTTP/3): %w", err)
+	}
+	t.udpbaraTunnel = tunnel
+	return tunnel, nil
+}
+
+// connectTunnelBounded runs tunnel.ConnectContext under a hard upper bound. The
+// udpbara handshake honors the context only for the TCP dial, not the SOCKS5
+// greeting reads, so a proxy that accepts TCP then goes silent would otherwise
+// block forever. We cap the wait at min(ctx deadline, max) and, on timeout,
+// abandon the connect and tear the tunnel down so the caller fails fast instead
+// of hanging.
+func connectTunnelBounded(parent context.Context, tunnel *udpbara.Tunnel, max time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, max)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- tunnel.ConnectContext(ctx) }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		// Abandon the stalled connect. Close() unblocks the connect once udpbara
+		// has installed its control socket; a proxy stuck before that point leaves
+		// one udpbara goroutine parked on a socket read until the process exits —
+		// a known udpbara limitation (its handshake reads set no deadline). Far
+		// better than hanging the dial.
+		tunnel.Close()
+		return fmt.Errorf("SOCKS5 UDP relay connect timed out: %w", ctx.Err())
+	}
 }
 
 // dialQUICWithProxy dials a QUIC connection through SOCKS5 proxy via udpbara.
@@ -872,9 +977,16 @@ func (t *HTTP3Transport) dialQUICWithProxy(ctx context.Context, addr string, tls
 	// Fetch ECH config (still needed for end-to-end TLS privacy)
 	echConfigList := t.getECHConfig(ctx, host)
 
+	// Connect the SOCKS5 UDP relay tunnel on first use (lazy). Bounded by ctx so
+	// a stalling proxy fails the dial instead of hanging it.
+	tunnel, err := t.ensureUDPTunnel(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create udpbara connection through the tunnel
 	// This creates a local UDP socket pair — instant, no network I/O
-	udpConn, err := t.udpbaraTunnel.DialContext(ctx, target)
+	udpConn, err := tunnel.DialContext(ctx, target)
 	if err != nil {
 		return nil, fmt.Errorf("udpbara dial failed: %w", err)
 	}
@@ -935,6 +1047,23 @@ func (t *HTTP3Transport) raceQUICDial(ctx context.Context, host string, ipv6Addr
 	return t.raceQUICDialWithECH(ctx, host, ipv6Addrs, ipv4Addrs, tlsCfg, cfg, echConfigList)
 }
 
+// SetIPv4FirstOverride transiently biases the next Happy-Eyeballs QUIC dials to
+// lead with IPv4. doHTTP3 flips it on for a single forced-H3 retry after the
+// leading family stalled the roundtrip, then flips it back.
+func (t *HTTP3Transport) SetIPv4FirstOverride(v bool) {
+	t.ipv4FirstOverride.Store(v)
+}
+
+// preferIPv4Ordering reports whether the QUIC dial should interleave IPv4 first.
+// It honors both the persistent DNS-cache PreferIPv4 knob and the transient
+// per-retry override set by SetIPv4FirstOverride.
+func (t *HTTP3Transport) preferIPv4Ordering() bool {
+	if t.ipv4FirstOverride.Load() {
+		return true
+	}
+	return t.dnsCache != nil && t.dnsCache.PreferIPv4()
+}
+
 // raceQUICDialWithECH implements Happy Eyeballs-style connection racing with pre-fetched ECH config
 // Tries IPv6 first with a short timeout, then falls back to IPv4 if needed
 func (t *HTTP3Transport) raceQUICDialWithECH(ctx context.Context, host string, ipv6Addrs, ipv4Addrs []*net.UDPAddr, tlsCfg *tls.Config, cfg *quic.Config, echConfigList []byte) (*quic.Conn, error) {
@@ -943,44 +1072,107 @@ func (t *HTTP3Transport) raceQUICDialWithECH(ctx context.Context, host string, i
 		return nil, fmt.Errorf("no addresses to dial")
 	}
 
-	// Capture PSK spec for 0-RTT before racing (was set in dialQUICWithDNS)
-	pskSpec := cfg.CachedClientHelloSpec
+	// NOTE: deliberately no captured spec here. utls mutates a ClientHelloSpec in
+	// place during ApplyPreset, so handing the same *ClientHelloSpec to several
+	// staggered dials lets two in-flight handshakes corrupt each other's
+	// ClientHello. getSpecForHost regenerates one per call, which is what the
+	// per-attempt closure below uses.
 
-	// Helper to create config with ECH for each dial attempt
-	// We preserve PSK spec for 0-RTT session resumption
-	makeConfig := func() *quic.Config {
-		cfgCopy := cfg.Clone()
-		// Keep PSK spec for 0-RTT (includes early_data extension)
-		cfgCopy.CachedClientHelloSpec = pskSpec
-		// Enable ECH for all connections (fresh and resumed)
-		// PSK info is now properly copied to inner ClientHello
-		if echConfigList != nil {
-			cfgCopy.ECHConfigList = echConfigList
+	// Helper to create config with a given ECH config for each dial attempt.
+	// Parameterised by ech so the same racer can be retried WITHOUT ECH (ech=nil)
+	// when the supplied config is rejected (see the graceful-degradation retry
+	// below). We preserve PSK spec for 0-RTT session resumption.
+	makeConfigWith := func(ech []byte) func() *quic.Config {
+		return func() *quic.Config {
+			cfgCopy := cfg.Clone()
+			// Fresh spec per attempt, not a shared pointer. Still the PSK
+			// variant for 0-RTT when a session exists: getSpecForHost picks it.
+			cfgCopy.CachedClientHelloSpec = t.getSpecForHost(host)
+			// Enable ECH for all connections (fresh and resumed)
+			// PSK info is now properly copied to inner ClientHello
+			if ech != nil {
+				cfgCopy.ECHConfigList = ech
+			}
+			return cfgCopy
 		}
-		return cfgCopy
 	}
 
-	if len(ipv6Addrs) == 0 {
-		return t.dialFirstSuccessful(ctx, ipv4Addrs, tlsCfg, makeConfig())
+	// Interleave the families and race them with a staggered start — rather than
+	// trying one whole family for 2s before the other, which stalled up to 2s on
+	// IPv6-broken networks. The leading family gets the ~250ms head start, so we
+	// honor the DNS cache's PreferIPv4 knob here to stay in step with the H1/H2
+	// direct path and the connection pools; default stays IPv6-first (RFC 8305).
+	var addrs []*net.UDPAddr
+	if t.preferIPv4Ordering() {
+		addrs = interleaveAddrs(ipv4Addrs, ipv6Addrs)
+	} else {
+		addrs = interleaveAddrs(ipv6Addrs, ipv4Addrs)
 	}
-	if len(ipv4Addrs) == 0 {
-		return t.dialFirstSuccessful(ctx, ipv6Addrs, tlsCfg, makeConfig())
+
+	if echConfigList == nil {
+		return t.happyEyeballsDialQUIC(ctx, addrs, tlsCfg, makeConfigWith(nil))
 	}
-
-	// Try IPv6 first with a short timeout (Happy Eyeballs style)
-	// If IPv6 fails or times out quickly, fall back to IPv4
-	ipv6Timeout := 2 * time.Second // Give IPv6 a reasonable chance
-	ipv6Ctx, ipv6Cancel := context.WithTimeout(ctx, ipv6Timeout)
-
-	conn, _ := t.dialFirstSuccessful(ipv6Ctx, ipv6Addrs, tlsCfg, makeConfig())
-	ipv6Cancel()
-
-	if conn != nil {
+	// Graceful ECH degradation (issue #74). Time-box the ECH attempt so a target
+	// that STALLS on an incompatible ECH ClientHello (a rotated/stale key, or an
+	// ECHConfigDomain that does not front this target) fails fast instead of
+	// burning the whole request deadline and cascading to H2/H1.
+	echCtx, cancel := boundedECHAttempt(ctx)
+	conn, err := t.happyEyeballsDialQUIC(echCtx, addrs, tlsCfg, makeConfigWith(echConfigList))
+	cancel()
+	if err == nil {
 		return conn, nil
 	}
+	if ctx.Err() != nil {
+		return conn, err // overall request budget exhausted
+	}
+	// The ECH attempt failed with budget to spare (reject, cert mismatch, or a
+	// stall caught by the ECH sub-deadline — ctx is not done, so a DeadlineExceeded
+	// here is echCtx's). Remember the host so later H3 dials skip ECH, and retry
+	// now without it so the connection still establishes.
+	if echCausedDialFailure(err) || errors.Is(err, context.DeadlineExceeded) {
+		dns.MarkECHIncompatible(host)
+		return t.happyEyeballsDialQUIC(ctx, addrs, tlsCfg, makeConfigWith(nil))
+	}
+	return conn, err
+}
 
-	// IPv6 failed, try IPv4 with fresh config
-	return t.dialFirstSuccessful(ctx, ipv4Addrs, tlsCfg, makeConfig())
+// interleaveAddrs alternates two address families (first list first) so the
+// staggered race tries one of each in turn instead of exhausting one family
+// before the other.
+func interleaveAddrs(first, second []*net.UDPAddr) []*net.UDPAddr {
+	out := make([]*net.UDPAddr, 0, len(first)+len(second))
+	i, j := 0, 0
+	for i < len(first) || j < len(second) {
+		if i < len(first) {
+			out = append(out, first[i])
+			i++
+		}
+		if j < len(second) {
+			out = append(out, second[j])
+			j++
+		}
+	}
+	return out
+}
+
+// happyEyeballsDialQUIC races QUIC dials across addrs with a staggered start
+// (RFC 8305 Happy Eyeballs v2): dial the first address, start each subsequent
+// address after a short Connection Attempt Delay — or immediately when a prior
+// attempt fails — and take the first connection that completes, cancelling and
+// closing the losers. This replaces "try all IPv6 for 2s, then all IPv4", which
+// added up to 2s of dead time before IPv4 on IPv6-broken networks.
+func (t *HTTP3Transport) happyEyeballsDialQUIC(ctx context.Context, addrs []*net.UDPAddr, tlsCfg *tls.Config, makeConfig func() *quic.Config) (*quic.Conn, error) {
+	const attemptDelay = 250 * time.Millisecond
+	return staggeredRace(ctx, len(addrs), attemptDelay,
+		func(rctx context.Context, idx int) (*quic.Conn, error) {
+			// Each attempt gets its own config clone AND its own regenerated
+			// ClientHello spec, so concurrent dials never mutate shared state.
+			// The spec matters most: utls rewrites it in place during
+			// ApplyPreset, so a shared one is corrupted by the racing dial.
+			return t.quicTransport.DialEarly(rctx, addrs[idx], tlsCfg, makeConfig())
+		},
+		func(c *quic.Conn) { c.CloseWithError(0, "lost happy-eyeballs race") },
+	)
 }
 
 // dialFirstSuccessful tries each address in order until one succeeds.
@@ -1047,10 +1239,10 @@ func (t *HTTP3Transport) buildQUICConfig(clientHelloID *utls.ClientHelloID, quic
 		ChromeStyleInitialPackets:     t.preset.H3QUICChromeStyleInitial(),
 		ClientHelloID:                 clientHelloID,
 		CachedClientHelloSpec:         t.cachedClientHelloSpec,
-		TransportParameterOrder:              resolveTransportParamOrder(t.preset.H3QUICTransportParamOrder()),
-		TransportParameterShuffleSeed:        t.shuffleSeed,
-		AdditionalTransportParameters:        AdditionalTransportParamsForPreset(t.preset, nil, "", 0),
-		MaxDatagramFrameSize:                 t.preset.H3QUICMaxDatagramFrameSize(),
+		TransportParameterOrder:       resolveTransportParamOrder(t.preset.H3QUICTransportParamOrder()),
+		TransportParameterShuffleSeed: t.shuffleSeed,
+		AdditionalTransportParameters: AdditionalTransportParamsForPreset(t.preset, nil, "", 0),
+		MaxDatagramFrameSize:          t.preset.H3QUICMaxDatagramFrameSize(),
 	}
 	// Optional per-preset flow-control overrides. Zero means "leave at quic-go
 	// default" — required for Chrome-style presets that match quic-go defaults
@@ -1182,9 +1374,10 @@ func (t *HTTP3Transport) dialQUIC(ctx context.Context, addr string, tlsCfg *tls.
 	// Measure RTT and build per-connection transport params with measured initial_rtt.
 	// For Chrome presets, includes google_connection_options, google_version, etc.
 	// For non-Chrome presets (Firefox), returns nil so Chrome-specific params aren't sent.
-	if params := AdditionalTransportParamsForPreset(t.preset, ctx, ips[0].String(), portInt); params != nil {
-		t.quicConfig.AdditionalTransportParameters = params
-	}
+	// Compute per-dial params (do NOT mutate the shared t.quicConfig — concurrent
+	// dials to different hosts would race on it). Applied to the per-dial clone
+	// (cfgCopy) below.
+	addlParams := AdditionalTransportParamsForPreset(t.preset, ctx, ips[0].String(), portInt)
 
 	// Filter IPs by local address family if set
 	if t.localAddr != "" {
@@ -1230,6 +1423,9 @@ func (t *HTTP3Transport) dialQUIC(ctx context.Context, addr string, tlsCfg *tls.
 
 	// Clone our QUIC config (with proper fingerprinting settings)
 	cfgCopy := t.quicConfig.Clone()
+	if addlParams != nil {
+		cfgCopy.AdditionalTransportParameters = addlParams
+	}
 
 	// Switch to PSK ClientHelloSpec for resumed connections
 	// If there's a cached session, use PSK spec (includes early_data + pre_shared_key extensions)
@@ -1434,10 +1630,15 @@ func (t *HTTP3Transport) Close() error {
 		closeWithTimeout(t.quicTransport, 3*time.Second)
 	}
 
-	// Close udpbara tunnel and all proxy QUIC connections
-	if t.udpbaraTunnel != nil {
+	// Close udpbara tunnel (if it was ever connected) and all proxy QUIC
+	// connections. Guard the tunnel handle with udpbaraMu since it is connected
+	// lazily from dial goroutines.
+	t.udpbaraMu.Lock()
+	tunnel := t.udpbaraTunnel
+	t.udpbaraMu.Unlock()
+	if tunnel != nil {
 		t.closeAllProxyConns()
-		t.udpbaraTunnel.Close()
+		tunnel.Close()
 	}
 
 	// Close MASQUE connection if using MASQUE proxy
@@ -1468,7 +1669,7 @@ func (t *HTTP3Transport) Refresh() error {
 	}
 
 	// Close and recreate quicTransport if it exists (for direct connections only)
-	if t.quicTransport != nil && t.udpbaraTunnel == nil && t.masqueConn == nil {
+	if t.quicTransport != nil && !t.usesUDPProxy && t.masqueConn == nil {
 		closeWithTimeout(t.quicTransport, 3*time.Second)
 		// Create new UDP socket with localAddr binding if configured
 		var localUDPAddr *net.UDPAddr
@@ -1495,9 +1696,19 @@ func (t *HTTP3Transport) Refresh() error {
 		}
 	}
 
-	// Close old proxy QUIC connections; tunnel stays alive for new dials
-	if t.udpbaraTunnel != nil {
+	// Close old proxy QUIC connections; tunnel stays alive for new dials.
+	// Keyed off usesUDPProxy (immutable) so it is race-free even if the tunnel
+	// has not been lazily connected yet.
+	if t.usesUDPProxy {
 		t.closeAllProxyConns()
+	}
+
+	// Reset the MASQUE tunnel so the next dial re-establishes over a fresh QUIC
+	// connection. Without this, Refresh left the tunnel marked established over
+	// the now-closed transport, and its datagram-receive goroutine + UDP socket
+	// leaked.
+	if t.masqueConn != nil {
+		t.masqueConn.Reset()
 	}
 
 	// Build additional settings from preset getters
@@ -1507,7 +1718,7 @@ func (t *HTTP3Transport) Refresh() error {
 	var dialFunc func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error)
 	if t.masqueConn != nil {
 		dialFunc = t.dialQUICWithMASQUE
-	} else if t.udpbaraTunnel != nil {
+	} else if t.usesUDPProxy {
 		dialFunc = t.dialQUICWithProxy
 	} else {
 		dialFunc = t.dialQUIC
@@ -1570,6 +1781,68 @@ func isECHRejectionError(err error) bool {
 	return false
 }
 
+// echCausedDialFailure reports whether a dial that had an ECH config applied
+// failed for a reason plausibly caused by that ECH config — a rotated/stale key,
+// or (issue #74) an ECHConfigDomain that does not actually front this target, so
+// the server rejects or mis-serves the ECH ClientHello. It is the trigger for
+// retrying the dial WITHOUT ECH: ECH is best-effort, so degrading to a working
+// (SNI-visible) connection beats failing the whole H3/H2 attempt and cascading to
+// the next protocol (which, on a target whose TCP path is slow, ends in a dial
+// timeout). It matches the same handshake/crypto signals as isECHRejectionError
+// plus certificate/TLS-alert failures (a cross-domain ECH public_name makes the
+// server present a mismatched certificate), but deliberately NOT i/o timeouts or
+// connection errors — retrying those without ECH would only double the wait.
+func echCausedDialFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isECHRejectionError(err) {
+		return true
+	}
+	s := err.Error()
+	for _, m := range []string{
+		"certificate",
+		"x509",
+		"tls: handshake",
+		"tls: server",
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// echAttemptMaxBudget caps how long an ECH-enabled dial/handshake is allowed
+// before it is abandoned in favour of a no-ECH retry. A real ECH handshake
+// completes in well under a second; a target that stalls on an incompatible ECH
+// ClientHello (issue #74) otherwise consumes the whole request deadline, leaving
+// nothing to retry without ECH.
+const echAttemptMaxBudget = 6 * time.Second
+
+// boundedECHAttempt returns a child context that time-boxes an ECH-enabled dial
+// so a stall fails fast and leaves budget for a no-ECH retry within the caller's
+// deadline. With no deadline it caps the attempt at echAttemptMaxBudget; with a
+// deadline it reserves roughly half the remaining budget for the retry.
+func boundedECHAttempt(ctx context.Context) (context.Context, context.CancelFunc) {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return context.WithTimeout(ctx, echAttemptMaxBudget)
+	}
+	remaining := time.Until(dl)
+	if remaining <= 0 {
+		// Already expired; hand back the context unchanged (the dial fails fast).
+		return context.WithCancel(ctx)
+	}
+	budget := remaining / 2
+	if budget > echAttemptMaxBudget {
+		budget = echAttemptMaxBudget
+	}
+	return context.WithTimeout(ctx, budget)
+}
+
+// recreateTransport recreates the HTTP/3 transport after 0-RTT rejection
+
 // recreateTransport recreates the HTTP/3 transport after 0-RTT rejection
 // This is called from RoundTrip when the server rejects early data
 func (t *HTTP3Transport) recreateTransport() {
@@ -1583,7 +1856,7 @@ func (t *HTTP3Transport) recreateTransport() {
 	var dialFunc func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error)
 	if t.masqueConn != nil {
 		dialFunc = t.dialQUICWithMASQUE
-	} else if t.udpbaraTunnel != nil {
+	} else if t.usesUDPProxy {
 		dialFunc = t.dialQUICWithProxy
 	} else {
 		dialFunc = t.dialQUIC
@@ -1614,9 +1887,14 @@ func (t *HTTP3Transport) GetECHConfigCache() map[string][]byte {
 	t.echConfigCacheMu.RLock()
 	defer t.echConfigCacheMu.RUnlock()
 
-	// Return a copy to avoid race conditions
+	// Return a copy to avoid race conditions. Skip negative (nil-config) entries —
+	// they exist only to suppress re-fetching a no-ECH host, and exporting them
+	// would pollute the persisted cache with meaningless nil configs.
 	result := make(map[string][]byte, len(t.echConfigCache))
 	for k, v := range t.echConfigCache {
+		if v.config == nil {
+			continue
+		}
 		result[k] = v.config
 	}
 	return result
@@ -1654,7 +1932,10 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 	// probe below would dial the target straight from the local socket, leaking
 	// the real client IP and never actually testing whether QUIC relays through
 	// the proxy. Route through the same dial path doHTTP3 uses for real requests.
-	if t.masqueConn != nil || t.udpbaraTunnel != nil {
+	// Keyed off usesUDPProxy (not the tunnel handle) because the tunnel is
+	// connected lazily — on the first probe it is still nil, and falling through
+	// to the direct path here would leak the real IP.
+	if t.masqueConn != nil || t.usesUDPProxy {
 		return t.connectViaProxy(ctx, host, port)
 	}
 
@@ -1685,10 +1966,15 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 		InsecureSkipVerify: t.insecureSkipVerify,
 		KeyLogWriter:       keyLogWriter,
 	}
+	t.tlsVerify.Apply(tlsCfg)
 
-	// Fetch ECH configs from DNS HTTPS records (use request host for ECH)
-	// This is non-blocking - if it fails, we proceed without ECH
-	echConfigList, _ := dns.FetchECHConfigs(ctx, host)
+	// Fetch ECH configs from DNS HTTPS records (use request host for ECH). Skipped
+	// for a host that recently stalled/rejected ECH (issue #74). Non-blocking - if
+	// it fails, we proceed without ECH.
+	var echConfigList []byte
+	if !dns.IsECHIncompatible(host) {
+		echConfigList, _ = dns.FetchECHConfigs(ctx, host)
+	}
 
 	// Determine QUIC idle timeout (default 30s, configurable)
 	quicIdleTimeout := 30 * time.Second
@@ -1714,8 +2000,25 @@ func (t *HTTP3Transport) Connect(ctx context.Context, host, port string) error {
 		quicCfg.ECHConfigList = echConfigList
 	}
 
-	// Try to establish QUIC connection
-	conn, err := quic.DialAddr(ctx, resolvedAddr, tlsCfg, quicCfg)
+	// Try to establish QUIC connection. When ECH is applied, time-box the attempt
+	// (issue #74) so a stall on an incompatible ECH ClientHello fails fast, then
+	// retry the probe once WITHOUT ECH so H3 stays a viable race winner. The real
+	// request dial applies the same degradation.
+	var conn *quic.Conn
+	if len(echConfigList) > 0 {
+		echCtx, cancel := boundedECHAttempt(ctx)
+		conn, err = quic.DialAddr(echCtx, resolvedAddr, tlsCfg, quicCfg)
+		cancel()
+		if err != nil && ctx.Err() == nil && (echCausedDialFailure(err) || errors.Is(err, context.DeadlineExceeded)) {
+			dns.MarkECHIncompatible(host)
+			t.invalidateECHConfig(host)
+			echlessCfg := t.buildQUICConfig(clientHelloID, quicIdleTimeout, 0)
+			echlessCfg.CachedClientHelloSpec = t.getSpecForHost(host)
+			conn, err = quic.DialAddr(ctx, resolvedAddr, tlsCfg, echlessCfg)
+		}
+	} else {
+		conn, err = quic.DialAddr(ctx, resolvedAddr, tlsCfg, quicCfg)
+	}
 	if err != nil {
 		// Stale ECH (e.g. CDN key rotation) shows up here as a handshake
 		// rejection; drop the cached config so the next probe refetches.
@@ -1771,6 +2074,7 @@ func (t *HTTP3Transport) connectViaProxy(ctx context.Context, host, port string)
 		InsecureSkipVerify: t.insecureSkipVerify,
 		KeyLogWriter:       keyLogWriter,
 	}
+	t.tlsVerify.Apply(tlsCfg)
 
 	conn, err := dialFunc(ctx, net.JoinHostPort(host, port), tlsCfg, nil)
 	if err != nil {
@@ -1877,6 +2181,13 @@ const echTransportCacheTTL = 5 * time.Minute
 // of one logical request; it must NOT pin a stale config forever, or a CDN ECH
 // key rotation strands the session on a retired key until restart.)
 func (t *HTTP3Transport) getECHConfig(ctx context.Context, targetHost string) []byte {
+	// Skip ECH entirely for a host that recently stalled or rejected an ECH
+	// handshake (issue #74), so H3 stops paying the stall until the incompatibility
+	// window lapses and ECH is retried for self-heal.
+	if dns.IsECHIncompatible(targetHost) {
+		return nil
+	}
+
 	t.echConfigCacheMu.RLock()
 	if cached, ok := t.echConfigCache[targetHost]; ok && time.Now().Before(cached.expiresAt) {
 		t.echConfigCacheMu.RUnlock()
@@ -1884,22 +2195,41 @@ func (t *HTTP3Transport) getECHConfig(ctx context.Context, targetHost string) []
 	}
 	t.echConfigCacheMu.RUnlock()
 
+	// The client-side ECH fetch is a cleartext HTTPS-record (type 65) query to a
+	// public resolver. On a PROXIED transport that would carry the target hostname
+	// to 8.8.8.8 OUTSIDE the proxy tunnel — leaking exactly the name the SOCKS5/
+	// MASQUE path otherwise keeps inside the tunnel. So over a proxy we never do a
+	// DNS-driven ECH fetch; the handshake just proceeds without ECH. An explicitly
+	// supplied ECH config (raw bytes, no DNS) is still honored. Non-proxied H3
+	// keeps full ECH auto-discovery.
+	proxied := t.proxyConfig != nil && t.proxyConfig.URL != ""
+
 	// No fresh cached config - fetch from DNS or config
 	var echConfig []byte
 	if t.config == nil {
+		if proxied {
+			return nil
+		}
 		echConfig, _ = dns.FetchECHConfigs(ctx, targetHost)
+	} else if proxied {
+		// Only the caller-provided raw ECH bytes are safe over a proxy; a
+		// domain/target HTTPS-record fetch inside GetECHConfig would leak.
+		echConfig = t.config.ECHConfig
 	} else {
 		echConfig = t.config.GetECHConfig(ctx, targetHost)
 	}
 
-	if echConfig != nil {
-		t.echConfigCacheMu.Lock()
-		t.echConfigCache[targetHost] = &echCachedConfig{
-			config:    echConfig,
-			expiresAt: time.Now().Add(echTransportCacheTTL),
-		}
-		t.echConfigCacheMu.Unlock()
+	// Cache the result — INCLUDING a nil (no-ECH) config as a negative entry — so a
+	// host that advertises no ECH is remembered for echTransportCacheTTL instead of
+	// re-fetched on every dial. (The DNS layer also negative-caches, but this keeps
+	// the per-dial lookup a single map read.) GetECHConfigCache skips nil entries so
+	// the persisted/exported format stays positive-only.
+	t.echConfigCacheMu.Lock()
+	t.echConfigCache[targetHost] = &echCachedConfig{
+		config:    echConfig,
+		expiresAt: time.Now().Add(echTransportCacheTTL),
 	}
+	t.echConfigCacheMu.Unlock()
 
 	return echConfig
 }

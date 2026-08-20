@@ -14,7 +14,22 @@ internal sealed class AsyncCallbackManager
     private static readonly Lazy<AsyncCallbackManager> _instance = new(() => new AsyncCallbackManager());
     public static AsyncCallbackManager Instance => _instance.Value;
 
-    private readonly ConcurrentDictionary<long, TaskCompletionSource<Response>> _pendingRequests = new();
+    // The start timestamp travels with the TCS so the completed Response carries
+    // a real Elapsed. Without it every async response reported Elapsed=0, while
+    // the sync methods timed themselves with a Stopwatch.
+    private readonly struct Pending
+    {
+        public Pending(TaskCompletionSource<Response> tcs, long startTimestamp)
+        {
+            Tcs = tcs;
+            StartTimestamp = startTimestamp;
+        }
+
+        public TaskCompletionSource<Response> Tcs { get; }
+        public long StartTimestamp { get; }
+    }
+
+    private readonly ConcurrentDictionary<long, Pending> _pendingRequests = new();
     private readonly Native.AsyncCallback _callback;
     private readonly object _lock = new();
 
@@ -24,10 +39,18 @@ internal sealed class AsyncCallbackManager
         _callback = OnCallback;
     }
 
+    // Stopwatch.GetElapsedTime is .NET 7+; net6.0 is still a target framework.
+    private static TimeSpan ElapsedSince(long startTimestamp)
+        => TimeSpan.FromSeconds((System.Diagnostics.Stopwatch.GetTimestamp() - startTimestamp)
+                                / (double)System.Diagnostics.Stopwatch.Frequency);
+
     private void OnCallback(long callbackId, IntPtr responseJsonPtr, IntPtr errorPtr)
     {
-        if (!_pendingRequests.TryRemove(callbackId, out var tcs))
+        if (!_pendingRequests.TryRemove(callbackId, out var pending))
             return;
+
+        var tcs = pending.Tcs;
+        TimeSpan elapsed = ElapsedSince(pending.StartTimestamp);
 
         try
         {
@@ -68,7 +91,7 @@ internal sealed class AsyncCallbackManager
                         return;
                     }
 
-                    tcs.TrySetResult(new Response(responseData));
+                    tcs.TrySetResult(new Response(responseData, elapsed));
                 }
                 catch (Exception ex)
                 {
@@ -88,33 +111,42 @@ internal sealed class AsyncCallbackManager
 
     /// <summary>
     /// Register a new async request. Returns (callbackId, Task).
-    /// When a CancellationToken is provided, cancellation will cancel the Task
-    /// (the Go goroutine continues but the caller is unblocked immediately).
     /// </summary>
-    public (long CallbackId, Task<Response> Task) RegisterRequest(CancellationToken cancellationToken = default)
+    public (long CallbackId, Task<Response> Task) RegisterRequest()
     {
         var tcs = new TaskCompletionSource<Response>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Register callback with Go - each request gets unique ID
         long callbackId = Native.RegisterCallback(_callback);
 
-        _pendingRequests[callbackId] = tcs;
-
-        // Wire up cancellation: cancel the Go context and the TCS
-        if (cancellationToken.CanBeCanceled)
-        {
-            var id = callbackId;
-            cancellationToken.Register(() =>
-            {
-                // Cancel the in-flight Go request (cancels context.Context → aborts DNS/TCP/TLS/HTTP)
-                Native.CancelRequest(id);
-                // Cancel the C# Task so the caller is unblocked immediately
-                if (_pendingRequests.TryRemove(id, out var removed))
-                    removed.TrySetCanceled(cancellationToken);
-            });
-        }
+        _pendingRequests[callbackId] = new Pending(tcs, System.Diagnostics.Stopwatch.GetTimestamp());
 
         return (callbackId, tcs.Task);
+    }
+
+    public void RegisterCancellation(long callbackId, Task<Response> task, CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.CanBeCanceled)
+            return;
+
+        var registration = cancellationToken.Register(() =>
+        {
+            if (_pendingRequests.TryRemove(callbackId, out var removed))
+            {
+                // Unblock the caller immediately, then cancel the in-flight Go
+                // request (cancels the context, aborting DNS/TCP/TLS/HTTP) and
+                // release the native callback slot so it cannot leak.
+                removed.Tcs.TrySetCanceled(cancellationToken);
+                Native.CancelRequest(callbackId);
+                Native.UnregisterCallback(callbackId);
+            }
+        });
+
+        _ = task.ContinueWith(
+            _ => registration.Dispose(),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }
 
@@ -761,7 +793,11 @@ public sealed class Session : IDisposable
             Method = method.ToUpperInvariant(),
             Url = url,
             Headers = headers.Count > 0 ? headers : null,
-            Timeout = timeout,
+            // Public API: seconds. The clib RequestRaw path expects milliseconds
+            // (matches the text Request() path above), so convert at the boundary.
+            // Without the *1000 a per-request timeout fired 1000x too early for
+            // every sync binary/multipart/stream body.
+            Timeout = timeout * 1000,
             FetchMode = fetchMode,
             FollowRedirects = allowRedirects,
             DisableConditionalCache = disableConditionalCache,
@@ -823,6 +859,8 @@ public sealed class Session : IDisposable
     public Task<Response> GetAsync(string url, Dictionary<string, string>? headers = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, (string, string)? auth = null, int? timeout = null, CancellationToken cancellationToken = default, string? fetchMode = null, bool? allowRedirects = null, bool disableConditionalCache = false, bool disableClientHints = false, bool disableHighEntropyClientHints = false)
     {
         ThrowIfDisposed();
+        if (cancellationToken.IsCancellationRequested)
+            return Task.FromCanceled<Response>(cancellationToken);
 
         url = AddParamsToUrl(url, parameters);
         headers = ApplyAuth(headers, auth);
@@ -845,8 +883,9 @@ public sealed class Session : IDisposable
             ? JsonSerializer.Serialize(options, JsonContext.Relaxed.RequestOptions)
             : null;
 
-        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest(cancellationToken);
+        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest();
         Native.GetAsync(_handle, url, optionsJson, callbackId);
+        AsyncCallbackManager.Instance.RegisterCancellation(callbackId, task, cancellationToken);
 
         return task;
     }
@@ -864,6 +903,8 @@ public sealed class Session : IDisposable
     public Task<Response> PostAsync(string url, string? body = null, Dictionary<string, string>? headers = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, (string, string)? auth = null, int? timeout = null, CancellationToken cancellationToken = default, string? fetchMode = null, bool? allowRedirects = null, bool disableConditionalCache = false, bool disableClientHints = false, bool disableHighEntropyClientHints = false)
     {
         ThrowIfDisposed();
+        if (cancellationToken.IsCancellationRequested)
+            return Task.FromCanceled<Response>(cancellationToken);
 
         url = AddParamsToUrl(url, parameters);
         headers = ApplyAuth(headers, auth);
@@ -873,6 +914,19 @@ public sealed class Session : IDisposable
         if (timeout != null)
             return RequestAsync("POST", url, body, headers, timeout, null, null, null, cancellationToken, fetchMode, allowRedirects, disableConditionalCache, disableClientHints, disableHighEntropyClientHints);
 
+        // The body is passed to PostAsync as a separate C string, which the native
+        // side reads via C.GoString — that stops at the first NUL, silently
+        // truncating any body with embedded NUL bytes (binary payloads, some JSON).
+        // Base64-encode in that case and flag body_encoding so the bytes survive
+        // the cgo boundary intact. Normal NUL-free bodies pass through unchanged.
+        string? wireBody = body;
+        string? bodyEncoding = null;
+        if (body != null && body.IndexOf('\0') >= 0)
+        {
+            wireBody = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(body));
+            bodyEncoding = "base64";
+        }
+
         // Wrap headers in RequestOptions structure (Go expects {"headers": {...}, "timeout": ...})
         var options = new RequestOptions {
             Headers = headers.Count > 0 ? headers : null,
@@ -881,14 +935,16 @@ public sealed class Session : IDisposable
             DisableConditionalCache = disableConditionalCache,
             DisableClientHints = disableClientHints,
             DisableHighEntropyClientHints = disableHighEntropyClientHints,
+            BodyEncoding = bodyEncoding,
         };
-        bool hasOptions = options.Headers != null || options.FetchMode != null || options.FollowRedirects != null || options.DisableConditionalCache || options.DisableClientHints || options.DisableHighEntropyClientHints;
+        bool hasOptions = options.Headers != null || options.FetchMode != null || options.FollowRedirects != null || options.DisableConditionalCache || options.DisableClientHints || options.DisableHighEntropyClientHints || options.BodyEncoding != null;
         string? optionsJson = hasOptions
             ? JsonSerializer.Serialize(options, JsonContext.Relaxed.RequestOptions)
             : null;
 
-        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest(cancellationToken);
-        Native.PostAsync(_handle, url, body, optionsJson, callbackId);
+        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest();
+        Native.PostAsync(_handle, url, wireBody, optionsJson, callbackId);
+        AsyncCallbackManager.Instance.RegisterCancellation(callbackId, task, cancellationToken);
 
         return task;
     }
@@ -933,6 +989,8 @@ public sealed class Session : IDisposable
     public Task<Response> RequestAsync(string method, string url, string? body = null, Dictionary<string, string>? headers = null, int? timeout = null, (string, string)? auth = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, CancellationToken cancellationToken = default, string? fetchMode = null, bool? allowRedirects = null, bool disableConditionalCache = false, bool disableClientHints = false, bool disableHighEntropyClientHints = false)
     {
         ThrowIfDisposed();
+        if (cancellationToken.IsCancellationRequested)
+            return Task.FromCanceled<Response>(cancellationToken);
 
         url = AddParamsToUrl(url, parameters);
         headers = ApplyAuth(headers, auth);
@@ -955,8 +1013,9 @@ public sealed class Session : IDisposable
 
         string requestJson = JsonSerializer.Serialize(request, JsonContext.Relaxed.RequestConfig);
 
-        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest(cancellationToken);
+        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest();
         Native.RequestAsync(_handle, requestJson, callbackId);
+        AsyncCallbackManager.Instance.RegisterCancellation(callbackId, task, cancellationToken);
 
         return task;
     }
@@ -1030,6 +1089,8 @@ public sealed class Session : IDisposable
     public Task<Response> RequestBinaryAsync(string method, string url, byte[] body, Dictionary<string, string>? headers = null, int? timeout = null, (string, string)? auth = null, IEnumerable<KeyValuePair<string, string>>? parameters = null, Dictionary<string, string>? cookies = null, CancellationToken cancellationToken = default, string? fetchMode = null, bool? allowRedirects = null, bool disableConditionalCache = false, bool disableClientHints = false, bool disableHighEntropyClientHints = false)
     {
         ThrowIfDisposed();
+        if (cancellationToken.IsCancellationRequested)
+            return Task.FromCanceled<Response>(cancellationToken);
 
         url = AddParamsToUrl(url, parameters);
         headers = ApplyAuth(headers, auth);
@@ -1052,8 +1113,9 @@ public sealed class Session : IDisposable
 
         string requestJson = JsonSerializer.Serialize(request, JsonContext.Relaxed.RequestConfig);
 
-        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest(cancellationToken);
+        var (callbackId, task) = AsyncCallbackManager.Instance.RegisterRequest();
         Native.RequestAsync(_handle, requestJson, callbackId);
+        AsyncCallbackManager.Instance.RegisterCancellation(callbackId, task, cancellationToken);
 
         return task;
     }
@@ -3079,6 +3141,30 @@ public static class Presets
     public const string ChromeLatestAndroid = "chrome-latest-android";
 
     // Chrome 149 (desktop; wire fingerprint identical to 148)
+    public const string Chrome151 = "chrome-151";
+    public const string Chrome151Windows = "chrome-151-windows";
+    public const string Chrome151Linux = "chrome-151-linux";
+    public const string Chrome151MacOS = "chrome-151-macos";
+    public const string Chrome151Android = "chrome-151-android";
+    public const string Chrome151IOS = "chrome-151-ios";
+
+    public const string Chrome150 = "chrome-150";
+    public const string Chrome150Windows = "chrome-150-windows";
+    public const string Chrome150Linux = "chrome-150-linux";
+    public const string Chrome150MacOS = "chrome-150-macos";
+    public const string Chrome150Android = "chrome-150-android";
+    public const string Chrome150IOS = "chrome-150-ios";
+
+    public const string Firefox148Windows = "firefox-148-windows";
+    public const string Firefox148Linux = "firefox-148-linux";
+    public const string Firefox148MacOS = "firefox-148-macos";
+    public const string Firefox133Windows = "firefox-133-windows";
+    public const string Firefox133Linux = "firefox-133-linux";
+    public const string Firefox133MacOS = "firefox-133-macos";
+    public const string FirefoxLatestWindows = "firefox-latest-windows";
+    public const string FirefoxLatestLinux = "firefox-latest-linux";
+    public const string FirefoxLatestMacOS = "firefox-latest-macos";
+
     public const string Chrome149 = "chrome-149";
     public const string Chrome149Windows = "chrome-149-windows";
     public const string Chrome149Linux = "chrome-149-linux";
@@ -3575,6 +3661,14 @@ internal class RequestOptions
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string>? Headers { get; set; }
 
+    // "base64" flags that the separately-passed body string is base64-encoded so
+    // the native side decodes it back to the exact bytes. Set this whenever the
+    // body could contain NUL bytes, which would otherwise terminate the C string
+    // early (post_async reads the body via C.GoString) and truncate the upload.
+    [JsonPropertyName("body_encoding")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BodyEncoding { get; set; }
+
     [JsonPropertyName("timeout")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Timeout { get; set; }
@@ -3745,6 +3839,39 @@ public sealed class HttpCloakHandler : DelegatingHandler
     /// </summary>
     public LocalProxyStats GetStats() => _proxy.GetStats();
 
+    // Internal header understood by the LocalProxy: upgrade a plain-HTTP proxy
+    // request back to HTTPS and apply the full browser fingerprint via a Session.
+    private const string SchemeHeader = "X-HTTPCloak-Scheme";
+
+    /// <summary>
+    /// Route an https:// request through httpcloak's fingerprinting path instead of
+    /// HttpClient's CONNECT tunnel. For an https:// URI through a proxy, HttpClient
+    /// issues CONNECT and then performs its OWN TLS handshake end to end, which
+    /// bypasses httpcloak entirely: the target sees .NET's TLS + header fingerprint,
+    /// not the browser preset. That made HttpCloakHandler behave differently from
+    /// Session and get blocked where Session was not (issue #79). Rewriting the URI
+    /// to http:// makes HttpClient send a plain absolute-form proxy request, which the
+    /// LocalProxy upgrades back to https via SchemeHeader and forwards through a
+    /// Session with the full TLS + header fingerprint. The localhost hop stays
+    /// plaintext; the fingerprinted TLS is between the LocalProxy and the target.
+    /// </summary>
+    private static void RouteThroughFingerprint(HttpRequestMessage request)
+    {
+        var uri = request.RequestUri;
+        if (uri == null || uri.Scheme != Uri.UriSchemeHttps)
+            return;
+
+        var builder = new UriBuilder(uri) { Scheme = Uri.UriSchemeHttp };
+        // Drop the port when it was the https default so the proxy upgrade yields a
+        // clean https://host; keep any explicit non-default port so it round-trips.
+        if (uri.IsDefaultPort)
+            builder.Port = -1;
+        request.RequestUri = builder.Uri;
+
+        if (!request.Headers.Contains(SchemeHeader))
+            request.Headers.Add(SchemeHeader, "https");
+    }
+
     /// <inheritdoc/>
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
@@ -3753,9 +3880,8 @@ public sealed class HttpCloakHandler : DelegatingHandler
         if (_disposed)
             throw new ObjectDisposedException(nameof(HttpCloakHandler));
 
-        // Just pass through - LocalProxy handles TLS fingerprinting
-        // HttpClient handles cookies, decompression, redirects natively
-        // TRUE streaming - no memory buffering!
+        // Force the LocalProxy fingerprinting path for https:// (avoid CONNECT).
+        RouteThroughFingerprint(request);
         return base.SendAsync(request, cancellationToken);
     }
 
@@ -3767,7 +3893,8 @@ public sealed class HttpCloakHandler : DelegatingHandler
         if (_disposed)
             throw new ObjectDisposedException(nameof(HttpCloakHandler));
 
-        // Synchronous version
+        // Force the LocalProxy fingerprinting path for https:// (avoid CONNECT).
+        RouteThroughFingerprint(request);
         return base.Send(request, cancellationToken);
     }
 

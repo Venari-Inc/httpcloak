@@ -25,6 +25,7 @@ package httpcloak
 import (
 	"bytes"
 	"context"
+	stdtls "crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"time"
 
@@ -169,6 +171,25 @@ type Request struct {
 	Body    io.Reader           // Streaming body for uploads
 	Timeout time.Duration
 
+	// GetBody returns a fresh reader over the same body for a request that has
+	// to go on the wire more than once: a 307 or 308 redirect hop, or a retried
+	// attempt.
+	//
+	// You rarely need to set this. When Body is one of the in-memory reader
+	// types — *bytes.Reader, *bytes.Buffer, *strings.Reader — a GetBody is
+	// derived automatically, which costs nothing because the bytes are already
+	// resident. Set it yourself when Body is a genuine stream (an *os.File, a
+	// pipe, a live multipart writer) and the request might be replayed;
+	// otherwise a 307 fails with ErrBodyNotReplayable rather than sending the
+	// hop with an empty body, and a retry is skipped rather than corrupted.
+	//
+	// It returns io.Reader rather than net/http's io.ReadCloser deliberately: an
+	// io.NopCloser wrapper would hide the concrete type from the type switch
+	// that sets Content-Length, and the replayed hop would go out chunked while
+	// the first one did not — a wire difference mid-chain that no browser
+	// produces.
+	GetBody func() (io.Reader, error)
+
 	// TLSOnly is a per-request override for TLS-only mode.
 	// When set to true, preset HTTP headers are NOT applied - only TLS fingerprinting is used.
 	// When nil, the session's TLSOnly setting is used.
@@ -198,6 +219,72 @@ type Request struct {
 	// but suppresses the high-entropy hints (full-version-list, arch,
 	// platform-version, bitness, model, wow64) for this single request.
 	DisableHighEntropyClientHints bool
+
+	// HeaderOrder, when non-empty, sets the header order for this single request
+	// and overrides whatever SetHeaderOrder installed on the session. Nothing is
+	// stored on the session and no lock is taken, so concurrent requests can each
+	// carry a different order — which is the point: use this instead of calling
+	// SetHeaderOrder around a request when one endpoint needs a header a browser
+	// never sends slotted in a specific place.
+	//
+	// The list is a prefix, not a whole-request replacement. Headers you name are
+	// emitted first, in this order; everything you leave out keeps the preset's
+	// own position (then a stable alphabetical tail for anything the preset does
+	// not know). Name every header you send and you get exactly that wire order.
+	// Names are case-insensitive. Empty or nil means "no per-request order" — the
+	// session-wide order applies.
+	//
+	// The order carries across followed redirects, because the headers it orders
+	// do: the session replays your request headers onto each hop, so a header you
+	// slotted explicitly here keeps that slot for the whole chain instead of being
+	// re-placed by the preset table on hop two.
+	//
+	//	resp, err := s.Do(ctx, &httpcloak.Request{
+	//	    Method:  "POST",
+	//	    URL:     "https://api.example.com/v1/checkout",
+	//	    Headers: map[string][]string{"x-api-token": {tok}},
+	//	    HeaderOrder: []string{
+	//	        "content-length", "sec-ch-ua", "x-api-token",
+	//	        "content-type", "user-agent", "accept",
+	//	    },
+	//	})
+	HeaderOrder []string
+
+	// OnRedirect, when non-nil, is called once per redirect hop before the
+	// follow-up request is built. Return nil to follow the hop,
+	// ErrUseLastResponse to stop the chain and get the 3xx back as the response
+	// with a nil error, or any other error to fail the request — that error
+	// reaches you unwrapped, so errors.Is against your own sentinel matches.
+	//
+	// This is the seam for a decision that has to be made per hop. Turning
+	// redirects off instead hands you the whole chain to re-implement, cookie
+	// jar and browser-parity header scrubbing included, and reading
+	// Response.History afterwards is too late: the request to the host you
+	// meant to block has already gone out. The callback also sees each hop's
+	// own headers, which is the only place to read a Set-Cookie or a routing
+	// header that the final response will not carry.
+	//
+	// The hop is read-only. Writing to it does not retarget the redirect: a
+	// callback able to rewrite the target would sit upstream of the scheme and
+	// origin scrubbing, which is what keeps Authorization from following a hop
+	// off-origin.
+	//
+	//	resp, err := s.Do(ctx, &httpcloak.Request{
+	//	    Method: "POST", URL: checkout, Body: body,
+	//	    OnRedirect: func(r *httpcloak.Redirect) error {
+	//	        if r.CrossOrigin {
+	//	            return httpcloak.ErrUseLastResponse // hand me the 3xx
+	//	        }
+	//	        return nil
+	//	    },
+	//	})
+	//
+	// It is not called for a 3xx with no Location, because there is no hop to
+	// veto, nor for the hop that would exceed the redirect cap, which fails with
+	// ErrTooManyRedirects instead. DoStream does not follow redirects at all, so
+	// it never fires there. It runs on the calling goroutine between hops, so it
+	// must not block and must not re-enter the same session.
+	OnRedirect func(*Redirect) error
 }
 
 // RedirectInfo contains information about a redirect response
@@ -280,6 +367,64 @@ func (r *Response) GetHeaders(key string) []string {
 	return r.Headers[strings.ToLower(key)]
 }
 
+// ErrNoLocation is returned by Response.Location when the response has no
+// Location header.
+//
+// Deliberately the same error value as transport.ErrNoLocation rather than a
+// separate sentinel with the same text: a caller doing
+// errors.Is(err, ErrNoLocation) must match regardless of which layer produced
+// the response.
+var ErrNoLocation = transport.ErrNoLocation
+
+// Redirect describes one hop a redirect chain is about to take. See
+// Request.OnRedirect.
+//
+// An alias rather than a copy of transport.Redirect: OnRedirect is a func value
+// travelling inward through the layers, so an alias makes
+// func(*httpcloak.Redirect) error and func(*transport.Redirect) error the
+// identical type and the field assigns straight through with no per-hop
+// conversion.
+type Redirect = transport.Redirect
+
+// ErrUseLastResponse, returned from a Request.OnRedirect callback, stops the
+// redirect chain and returns the 3xx itself with a nil error. Shaped after
+// net/http.ErrUseLastResponse.
+//
+// Deliberately the same error value as transport.ErrUseLastResponse, for the
+// same reason as ErrNoLocation above.
+var ErrUseLastResponse = transport.ErrUseLastResponse
+
+// ErrBodyNotReplayable is returned when a 307 or 308 needs the request body a
+// second time but Body was a one-shot stream and no GetBody was set to re-open
+// it. The 3xx is returned alongside the error, so you can read its Location and
+// drive the rest of the chain yourself. Set Request.GetBody to follow it
+// automatically.
+var ErrBodyNotReplayable = transport.ErrBodyNotReplayable
+
+// ErrTooManyRedirects is returned when a chain exceeds the configured cap. The
+// response carrying the last Location is returned alongside it, so you can see
+// where the chain ended up rather than only that it was too long.
+var ErrTooManyRedirects = transport.ErrTooManyRedirects
+
+// Location returns the URL of the response's "Location" header, if present.
+// A relative Location is resolved against the URL of the request that produced
+// the response (FinalURL), mirroring net/http's Response.Location. Useful for
+// inspecting 3xx responses when redirects are disabled via WithoutRedirects or
+// Request.FollowRedirects. ErrNoLocation is returned when no Location header
+// is present.
+func (r *Response) Location() (*url.URL, error) {
+	lv := r.GetHeader("Location")
+	if lv == "" {
+		return nil, ErrNoLocation
+	}
+	if r.FinalURL != "" {
+		if base, err := url.Parse(r.FinalURL); err == nil {
+			return base.Parse(lv)
+		}
+	}
+	return url.Parse(lv)
+}
+
 // Do executes an HTTP request
 func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	timeout := req.Timeout
@@ -293,6 +438,10 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		Headers: req.Headers,
 		Body:    req.Body,
 		Timeout: timeout,
+		// A veto that silently did not apply would be worse than no veto at
+		// all, so this one field is carried even though this literal drops most
+		// of Request (see the type's docs for what the Client path supports).
+		OnRedirect: req.OnRedirect,
 	}
 
 	resp, err := c.inner.Do(ctx, cReq)
@@ -374,36 +523,39 @@ type Session struct {
 type SessionOption func(*sessionConfig)
 
 type sessionConfig struct {
-	preset             string
-	proxy              string
-	tcpProxy           string // Proxy for TCP-based protocols (HTTP/1.1, HTTP/2)
-	udpProxy           string // Proxy for UDP-based protocols (HTTP/3 via MASQUE)
-	timeout            time.Duration
-	forceHTTP1         bool
-	forceHTTP2         bool
-	forceHTTP3         bool
-	disableHTTP3       bool
-	insecureSkipVerify bool
-	disableRedirects   bool
-	maxRedirects       int
-	retryCount         int
-	retryWaitMin       time.Duration
-	retryWaitMax       time.Duration
-	retryOnStatus      []int
-	preferIPv4         bool
-	connectTo          map[string]string // Domain fronting: request_host -> connect_host
-	echConfigDomain    string            // Domain to fetch ECH config from
-	tlsOnly            bool              // TLS-only mode: skip preset headers, set all manually
-	quicIdleTimeout    time.Duration     // QUIC idle timeout (default: 30s)
-	localAddr          string            // Local IP address to bind outgoing connections
-	keyLogFile         string            // Path to write TLS key log for Wireshark decryption
-	disableECH            bool   // Disable ECH lookup for faster first request
-	enableSpeculativeTLS bool   // Enable speculative TLS optimization for proxy connections
-	switchProtocol        string // Protocol to switch to after Refresh() (e.g. "h1", "h2", "h3")
-	withoutCookieJar      bool   // Disable internal cookie jar entirely (caller manages cookies via headers)
-	withoutConditionalCache bool // Disable ETag / If-Modified-Since handling entirely
-	withoutClientHints    bool   // Disable all UA client hints (trio + high-entropy)
-	withoutHighEntropyClientHints bool // Disable only the high-entropy UA client hints
+	preset                        string
+	proxy                         string
+	tcpProxy                      string // Proxy for TCP-based protocols (HTTP/1.1, HTTP/2)
+	udpProxy                      string // Proxy for UDP-based protocols (HTTP/3 via MASQUE)
+	timeout                       time.Duration
+	forceHTTP1                    bool
+	forceHTTP2                    bool
+	forceHTTP3                    bool
+	disableHTTP3                  bool
+	insecureSkipVerify            bool
+	tlsVerifyPeerCertificate      func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
+	tlsVerifyConnection           func(cs stdtls.ConnectionState) error
+	tlsRootCAs                    *x509.CertPool
+	disableRedirects              bool
+	maxRedirects                  int
+	retryCount                    int
+	retryWaitMin                  time.Duration
+	retryWaitMax                  time.Duration
+	retryOnStatus                 []int
+	preferIPv4                    bool
+	connectTo                     map[string]string // Domain fronting: request_host -> connect_host
+	echConfigDomain               string            // Domain to fetch ECH config from
+	tlsOnly                       bool              // TLS-only mode: skip preset headers, set all manually
+	quicIdleTimeout               time.Duration     // QUIC idle timeout (default: 30s)
+	localAddr                     string            // Local IP address to bind outgoing connections
+	keyLogFile                    string            // Path to write TLS key log for Wireshark decryption
+	disableECH                    bool              // Disable ECH lookup for faster first request
+	enableSpeculativeTLS          bool              // Enable speculative TLS optimization for proxy connections
+	switchProtocol                string            // Protocol to switch to after Refresh() (e.g. "h1", "h2", "h3")
+	withoutCookieJar              bool              // Disable internal cookie jar entirely (caller manages cookies via headers)
+	withoutConditionalCache       bool              // Disable ETag / If-Modified-Since handling entirely
+	withoutClientHints            bool              // Disable all UA client hints (trio + high-entropy)
+	withoutHighEntropyClientHints bool              // Disable only the high-entropy UA client hints
 
 	// Distributed session cache
 	sessionCacheBackend       transport.SessionCacheBackend
@@ -483,6 +635,67 @@ func WithDisableHTTP3() SessionOption {
 func WithInsecureSkipVerify() SessionOption {
 	return func(c *sessionConfig) {
 		c.insecureSkipVerify = true
+	}
+}
+
+// WithVerifyPeerCertificate installs a certificate verification callback,
+// mirroring crypto/tls.Config.VerifyPeerCertificate.
+//
+// It runs after the normal certificate checks, with the raw certificates and
+// any chains the default verifier built; returning an error aborts the
+// handshake. This is the hook for certificate pinning. Pair it with
+// WithInsecureSkipVerify to replace the default verification rather than add
+// to it.
+func WithVerifyPeerCertificate(fn func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error) SessionOption {
+	return func(c *sessionConfig) {
+		c.tlsVerifyPeerCertificate = fn
+	}
+}
+
+// WithVerifyConnection installs a connection verification callback, mirroring
+// crypto/tls.Config.VerifyConnection. It runs after WithVerifyPeerCertificate,
+// on every handshake including resumptions.
+//
+// The state is the standard library type, translated from the underlying uTLS
+// connection state. Everything a verification callback normally reads is
+// populated; ExportKeyingMaterial on it is not usable, because that plumbing
+// cannot be reconstructed from outside crypto/tls.
+func WithVerifyConnection(fn func(cs stdtls.ConnectionState) error) SessionOption {
+	return func(c *sessionConfig) {
+		c.tlsVerifyConnection = fn
+	}
+}
+
+// WithTLSConfig takes the verification settings from a standard *tls.Config.
+//
+// Reaching for a tls.Config is the reflex, so this accepts one, but be clear on
+// what it reads. Honoured: VerifyPeerCertificate, VerifyConnection and
+// InsecureSkipVerify. Ignored: everything that shapes the ClientHello, which is
+// CipherSuites, MinVersion, MaxVersion, CurvePreferences, NextProtos,
+// ServerName and the rest. Those come from the browser preset. Letting a caller
+// override them would quietly destroy the fingerprint the library exists to
+// reproduce, and the damage would only be visible to whoever is fingerprinting
+// at the other end.
+//
+// Prefer WithVerifyPeerCertificate and WithVerifyConnection, which make the
+// supported surface obvious. A nil config is ignored.
+func WithTLSConfig(cfg *stdtls.Config) SessionOption {
+	return func(c *sessionConfig) {
+		if cfg == nil {
+			return
+		}
+		if cfg.VerifyPeerCertificate != nil {
+			c.tlsVerifyPeerCertificate = cfg.VerifyPeerCertificate
+		}
+		if cfg.VerifyConnection != nil {
+			c.tlsVerifyConnection = cfg.VerifyConnection
+		}
+		if cfg.RootCAs != nil {
+			c.tlsRootCAs = cfg.RootCAs
+		}
+		if cfg.InsecureSkipVerify {
+			c.insecureSkipVerify = true
+		}
 	}
 }
 
@@ -792,26 +1005,29 @@ func NewSession(preset string, opts ...SessionOption) *Session {
 	}
 
 	sessionCfg := &protocol.SessionConfig{
-		Preset:             cfg.preset,
-		Proxy:              cfg.proxy,
-		TCPProxy:           cfg.tcpProxy,
-		UDPProxy:           cfg.udpProxy,
-		Timeout:            int(cfg.timeout.Seconds()),
-		InsecureSkipVerify: cfg.insecureSkipVerify,
-		FollowRedirects:    !cfg.disableRedirects,
-		MaxRedirects:       cfg.maxRedirects,
-		PreferIPv4:         cfg.preferIPv4,
-		ConnectTo:          cfg.connectTo,
-		ECHConfigDomain:    cfg.echConfigDomain,
-		TLSOnly:            cfg.tlsOnly,
-		QuicIdleTimeout:    int(cfg.quicIdleTimeout.Seconds()),
-		LocalAddress:       cfg.localAddr,
-		KeyLogFile:         cfg.keyLogFile,
-		DisableECH:            cfg.disableECH,
-		EnableSpeculativeTLS: cfg.enableSpeculativeTLS,
-		SwitchProtocol:          cfg.switchProtocol,
-		WithoutCookieJar:        cfg.withoutCookieJar,
-		WithoutConditionalCache: cfg.withoutConditionalCache,
+		Preset:                        cfg.preset,
+		Proxy:                         cfg.proxy,
+		TCPProxy:                      cfg.tcpProxy,
+		UDPProxy:                      cfg.udpProxy,
+		Timeout:                       int(cfg.timeout.Seconds()),
+		InsecureSkipVerify:            cfg.insecureSkipVerify,
+		TLSVerifyPeerCertificate:      cfg.tlsVerifyPeerCertificate,
+		TLSVerifyConnection:           cfg.tlsVerifyConnection,
+		TLSRootCAs:                    cfg.tlsRootCAs,
+		FollowRedirects:               !cfg.disableRedirects,
+		MaxRedirects:                  cfg.maxRedirects,
+		PreferIPv4:                    cfg.preferIPv4,
+		ConnectTo:                     cfg.connectTo,
+		ECHConfigDomain:               cfg.echConfigDomain,
+		TLSOnly:                       cfg.tlsOnly,
+		QuicIdleTimeout:               int(cfg.quicIdleTimeout.Seconds()),
+		LocalAddress:                  cfg.localAddr,
+		KeyLogFile:                    cfg.keyLogFile,
+		DisableECH:                    cfg.disableECH,
+		EnableSpeculativeTLS:          cfg.enableSpeculativeTLS,
+		SwitchProtocol:                cfg.switchProtocol,
+		WithoutCookieJar:              cfg.withoutCookieJar,
+		WithoutConditionalCache:       cfg.withoutConditionalCache,
 		WithoutClientHints:            cfg.withoutClientHints,
 		WithoutHighEntropyClientHints: cfg.withoutHighEntropyClientHints,
 	}
@@ -867,96 +1083,100 @@ func NewSession(preset string, opts ...SessionOption) *Session {
 	return &Session{inner: s, configErr: cfg.configErr}
 }
 
-// Do executes a request within the session, maintaining cookies
+// toResponse converts a transport response, including its redirect history.
+// A nil input gives a nil output, because the session may return a response
+// alongside an error (ErrTooManyRedirects, ErrBodyNotReplayable) and may return
+// neither.
+func toResponse(resp *transport.Response) *Response {
+	if resp == nil {
+		return nil
+	}
+
+	var history []*RedirectInfo
+	if len(resp.History) > 0 {
+		history = make([]*RedirectInfo, len(resp.History))
+		for i, h := range resp.History {
+			history[i] = &RedirectInfo{
+				StatusCode: h.StatusCode,
+				URL:        h.URL,
+				Headers:    h.Headers,
+			}
+		}
+	}
+
+	return &Response{
+		StatusCode: resp.StatusCode,
+		Headers:    resp.Headers,
+		Body:       resp.Body,
+		FinalURL:   resp.FinalURL,
+		Protocol:   resp.Protocol,
+		History:    history,
+	}
+}
+
+// Do executes a request within the session, maintaining cookies.
+//
+// A non-nil response can accompany a non-nil error: ErrTooManyRedirects and
+// ErrBodyNotReplayable both hand back the 3xx that ended the chain, so a caller
+// can read its Location and decide what to do. The body is buffered, so
+// ignoring that response leaks nothing.
 func (s *Session) Do(ctx context.Context, req *Request) (*Response, error) {
 	if s.configErr != nil {
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:                  req.Method,
-		URL:                     req.URL,
-		Headers:                 req.Headers,
-		BodyReader:              req.Body,
-		TLSOnly:                 req.TLSOnly,
-		FollowRedirects:         req.FollowRedirects,
-		DisableConditionalCache: req.DisableConditionalCache,
+		Method:                        req.Method,
+		URL:                           req.URL,
+		Headers:                       req.Headers,
+		BodyReader:                    req.Body,
+		GetBody:                       req.GetBody,
+		TLSOnly:                       req.TLSOnly,
+		FollowRedirects:               req.FollowRedirects,
+		DisableConditionalCache:       req.DisableConditionalCache,
 		DisableClientHints:            req.DisableClientHints,
 		DisableHighEntropyClientHints: req.DisableHighEntropyClientHints,
-		Timeout:                 req.Timeout,
+		HeaderOrder:                   req.HeaderOrder,
+		OnRedirect:                    req.OnRedirect,
+		Timeout:                       req.Timeout,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
 	if err != nil {
-		return nil, err
+		return toResponse(resp), err
 	}
-
-	// Convert redirect history
-	var history []*RedirectInfo
-	if len(resp.History) > 0 {
-		history = make([]*RedirectInfo, len(resp.History))
-		for i, h := range resp.History {
-			history[i] = &RedirectInfo{
-				StatusCode: h.StatusCode,
-				URL:        h.URL,
-				Headers:    h.Headers,
-			}
-		}
-	}
-
-	return &Response{
-		StatusCode: resp.StatusCode,
-		Headers:    resp.Headers,
-		Body:       resp.Body,
-		FinalURL:   resp.FinalURL,
-		Protocol:   resp.Protocol,
-		History:    history,
-	}, nil
+	return toResponse(resp), nil
 }
 
-// DoWithBody executes a request with an io.Reader as the body for streaming uploads
+// DoWithBody executes a request with an io.Reader as the body for streaming
+// uploads. The reader replaces Request.Body; Request.GetBody, if set, still
+// applies and must re-open the same content.
+//
+// As with Do, a non-nil response can accompany a non-nil error.
 func (s *Session) DoWithBody(ctx context.Context, req *Request, bodyReader io.Reader) (*Response, error) {
 	if s.configErr != nil {
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:                  req.Method,
-		URL:                     req.URL,
-		Headers:                 req.Headers,
-		BodyReader:              bodyReader,
-		TLSOnly:                 req.TLSOnly,
-		FollowRedirects:         req.FollowRedirects,
-		DisableConditionalCache: req.DisableConditionalCache,
+		Method:                        req.Method,
+		URL:                           req.URL,
+		Headers:                       req.Headers,
+		BodyReader:                    bodyReader,
+		GetBody:                       req.GetBody,
+		TLSOnly:                       req.TLSOnly,
+		FollowRedirects:               req.FollowRedirects,
+		DisableConditionalCache:       req.DisableConditionalCache,
 		DisableClientHints:            req.DisableClientHints,
 		DisableHighEntropyClientHints: req.DisableHighEntropyClientHints,
-		Timeout:                 req.Timeout,
+		HeaderOrder:                   req.HeaderOrder,
+		OnRedirect:                    req.OnRedirect,
+		Timeout:                       req.Timeout,
 	}
 
 	resp, err := s.inner.Request(ctx, sReq)
 	if err != nil {
-		return nil, err
+		return toResponse(resp), err
 	}
-
-	// Convert redirect history
-	var history []*RedirectInfo
-	if len(resp.History) > 0 {
-		history = make([]*RedirectInfo, len(resp.History))
-		for i, h := range resp.History {
-			history[i] = &RedirectInfo{
-				StatusCode: h.StatusCode,
-				URL:        h.URL,
-				Headers:    h.Headers,
-			}
-		}
-	}
-
-	return &Response{
-		StatusCode: resp.StatusCode,
-		Headers:    resp.Headers,
-		Body:       resp.Body,
-		FinalURL:   resp.FinalURL,
-		Protocol:   resp.Protocol,
-		History:    history,
-	}, nil
+	return toResponse(resp), nil
 }
 
 // Get performs a GET request within the session
@@ -1033,6 +1253,16 @@ func (s *Session) GetUDPProxy() string {
 // SetHeaderOrder sets a custom header order for all requests.
 // Pass nil or empty slice to reset to preset's default order.
 // Order should contain lowercase header names.
+//
+// The list is a prefix, not a replacement: the headers named here lead in the
+// order given, the preset's own table then covers whatever they did not name,
+// and anything still unplaced follows sorted by name. A partial list therefore
+// costs nothing for the headers it leaves out.
+//
+// This mutates shared session state, so it is the wrong tool when only one
+// request needs a different order — callers would have to serialize around it.
+// Set Request.HeaderOrder instead: it applies to that request alone and ignores
+// whatever is installed here.
 func (s *Session) SetHeaderOrder(order []string) {
 	s.inner.SetHeaderOrder(order)
 }
@@ -1198,18 +1428,48 @@ func (s *Session) Marshal() ([]byte, error) {
 	return s.inner.Marshal()
 }
 
-// LoadSession loads a session from a file
+// SessionLoadOptions supplies the parts of a saved session's configuration that
+// JSON cannot carry: the certificate verification hooks installed with
+// WithVerifyPeerCertificate and WithVerifyConnection, and the trust store
+// installed with WithTLSConfig.
+//
+// Those are Go functions and a *x509.CertPool, so Save can only record THAT
+// they were configured, never what they did. The fields here take exactly what
+// those options take.
+type SessionLoadOptions = session.SessionLoadOptions
+
+// LoadSession loads a session from a file.
+//
+// Fails if the saved session had certificate verification hooks configured.
+// They cannot be serialised, and restoring without them would hand back a
+// session that accepts certificates the saved one would have rejected, with
+// nothing to say so. Use LoadSessionWithOptions to pass them back in.
 func LoadSession(path string) (*Session, error) {
-	inner, err := session.LoadSession(path)
+	return LoadSessionWithOptions(path, nil)
+}
+
+// LoadSessionWithOptions loads a session from a file, re-supplying the
+// verification hooks it was saved with.
+func LoadSessionWithOptions(path string, opts *SessionLoadOptions) (*Session, error) {
+	inner, err := session.LoadSessionWithOptions(path, opts)
 	if err != nil {
 		return nil, err
 	}
 	return &Session{inner: inner}, nil
 }
 
-// UnmarshalSession loads a session from JSON bytes
+// UnmarshalSession loads a session from JSON bytes.
+//
+// Fails if the saved session had certificate verification hooks configured. See
+// LoadSession.
 func UnmarshalSession(data []byte) (*Session, error) {
-	inner, err := session.UnmarshalSession(data)
+	return UnmarshalSessionWithOptions(data, nil)
+}
+
+// UnmarshalSessionWithOptions loads a session from JSON bytes, re-supplying the
+// verification hooks it was saved with.
+func UnmarshalSessionWithOptions(data []byte, opts *SessionLoadOptions) (*Session, error) {
+	inner, err := session.UnmarshalSessionWithOptions(data, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -1251,22 +1511,26 @@ func (r *StreamResponse) ReadChunk(size int) ([]byte, error) {
 
 // DoStream executes an HTTP request and returns a streaming response
 // The caller is responsible for closing the response when done
-// Note: Streaming does NOT support redirects - use Do() for redirect handling
+// Note: Streaming does NOT support redirects - use Do() for redirect handling.
+// Request.OnRedirect is therefore not carried here: it would never fire, and
+// wiring it would suggest otherwise.
 func (s *Session) DoStream(ctx context.Context, req *Request) (*StreamResponse, error) {
 	if s.configErr != nil {
 		return nil, s.configErr
 	}
 	sReq := &transport.Request{
-		Method:                  req.Method,
-		URL:                     req.URL,
-		Headers:                 req.Headers,
-		BodyReader:              req.Body,
-		TLSOnly:                 req.TLSOnly,
-		FollowRedirects:         req.FollowRedirects,
-		DisableConditionalCache: req.DisableConditionalCache,
+		Method:                        req.Method,
+		URL:                           req.URL,
+		Headers:                       req.Headers,
+		BodyReader:                    req.Body,
+		GetBody:                       req.GetBody,
+		TLSOnly:                       req.TLSOnly,
+		FollowRedirects:               req.FollowRedirects,
+		DisableConditionalCache:       req.DisableConditionalCache,
 		DisableClientHints:            req.DisableClientHints,
 		DisableHighEntropyClientHints: req.DisableHighEntropyClientHints,
-		Timeout:                 req.Timeout,
+		HeaderOrder:                   req.HeaderOrder,
+		Timeout:                       req.Timeout,
 	}
 
 	resp, err := s.inner.RequestStream(ctx, sReq)
