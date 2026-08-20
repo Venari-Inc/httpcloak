@@ -1,0 +1,22 @@
+# v40 per-project wiring for httpcloak. Written by /v40:setup; nothing else
+# writes this file. Shell assignments only — the prose that explains them lives
+# in .v40/wiring.md beside it.
+#
+# Precedence: an exported environment variable beats this file, and this file
+# beats shipctl.sh's built-in defaults. Nothing recorded here takes a per-run
+# decision away from the operator.
+#
+# Knobs not listed here keep shipctl.sh's built-in default on purpose: a value
+# nobody measured is worse than the default.
+
+# See .v40/wiring.md — `-short` is a correctness choice, not a speed one.
+SHIPCTL_SUITE_CMD="go test -short ./..."
+
+# From `shipctl.sh setup-check --fingerprint`, so this value and the one later
+# compared against it are produced by the same code.
+SHIPCTL_CI_FINGERPRINT="2c4d6c88ca7bd3ca18eb1c12d503184fb7a45c48c1f23228ca7977153eacef70"
+
+# SHIPCTL_CHECKS_REQUIRED is deliberately unset. This repository has no CI, and
+# that was verified against the server rather than inferred — see .v40/wiring.md.
+# Unset keeps checks-wait reporting checks-not-observed and letting the merge
+# proceed, which is the correct outcome when there is nothing to observe.
