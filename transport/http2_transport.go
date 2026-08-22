@@ -119,6 +119,8 @@ type clientHelloExtensionKey struct {
 	oldChannelID  bool
 }
 
+type fallbackClientHelloSpecTransform func(initial, fallback *utls.ClientHelloSpec) error
+
 func extensionKey(extension utls.TLSExtension) clientHelloExtensionKey {
 	key := clientHelloExtensionKey{extensionType: reflect.TypeOf(extension)}
 	switch extension := extension.(type) {
@@ -654,17 +656,17 @@ func (t *HTTP2Transport) isConnDestroyable(conn *persistentConn) bool {
 // the connection still establishes (SNI visible) instead of failing H2 and
 // cascading to H1. An ALPNMismatchError is never retried here — it carries a live
 // TLS connection the caller reuses for H1.
-func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*persistentConn, error) {
+func (t *HTTP2Transport) createConn(ctx context.Context, host, port string, fallbackSpecTransform ...fallbackClientHelloSpecTransform) (*persistentConn, error) {
 	// No ECH configured, or this host recently stalled/rejected ECH: dial once,
 	// skipping ECH when the host is known ECH-incompatible.
 	if !t.echConfigured() || dns.IsECHIncompatible(host) {
-		return t.establishConn(ctx, host, port, t.echConfigured() && dns.IsECHIncompatible(host))
+		return t.establishConn(ctx, host, port, t.echConfigured() && dns.IsECHIncompatible(host), fallbackSpecTransform...)
 	}
 	// Time-box the ECH attempt so a target that STALLS on an incompatible ECH
 	// ClientHello (issue #74 — some servers stall rather than cleanly reject) fails
 	// fast, leaving budget to retry without ECH within the same request deadline.
 	echCtx, cancel := boundedECHAttempt(ctx)
-	conn, err := t.establishConn(echCtx, host, port, false)
+	conn, err := t.establishConn(echCtx, host, port, false, fallbackSpecTransform...)
 	cancel()
 	if err == nil {
 		return conn, nil
@@ -682,7 +684,7 @@ func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*pe
 	// future connections skip the stall, and retry now without ECH.
 	if echCausedDialFailure(err) || errors.Is(err, context.DeadlineExceeded) {
 		dns.MarkECHIncompatible(host)
-		return t.establishConn(ctx, host, port, true)
+		return t.establishConn(ctx, host, port, true, fallbackSpecTransform...)
 	}
 	return conn, err
 }
@@ -695,7 +697,7 @@ func (t *HTTP2Transport) echConfigured() bool {
 
 // establishConn creates a new persistent connection. skipECH forces a no-ECH
 // handshake (see createConn's graceful-degradation retry).
-func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, skipECH bool) (*persistentConn, error) {
+func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, skipECH bool, fallbackSpecTransform ...fallbackClientHelloSpecTransform) (*persistentConn, error) {
 	var rawConn net.Conn
 	var err error
 
@@ -948,6 +950,12 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 			if fallbackJA3 == "" && fallbackSpec != nil {
 				fingerprint.ApplySignatureAlgorithms(fallbackSpec.Extensions, t.preset.SignatureAlgorithms)
 				fingerprint.ApplyTrustAnchors(&fallbackSpec.Extensions, t.preset.TrustAnchors)
+			}
+			if fallbackSpec != nil && len(fallbackSpecTransform) != 0 {
+				if transformErr := fallbackSpecTransform[0](specToUse, fallbackSpec); transformErr != nil {
+					rawConn.Close()
+					return nil, fmt.Errorf("speculative TLS fallback: %w", transformErr)
+				}
 			}
 			if fallbackSpec == nil && initialExtensionOrder != nil {
 				rawConn.Close()
