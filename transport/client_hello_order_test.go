@@ -15,8 +15,10 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -426,16 +428,36 @@ func (p *fallbackProxy) next(t *testing.T) capturedClientHello {
 	}
 }
 
-func connectThroughFallback(t *testing.T, transport *HTTP2Transport, proxy *fallbackProxy) (capturedClientHello, capturedClientHello) {
+func connectThroughFallback(t *testing.T, transport *HTTP2Transport, proxy *fallbackProxy, fallbackSpecTransform ...fallbackClientHelloSpecTransform) (capturedClientHello, capturedClientHello) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := transport.createConn(ctx, "example.com", "443")
+	conn, err := transport.createConn(ctx, "example.com", "443", fallbackSpecTransform...)
 	if err != nil {
 		t.Fatalf("createConn through speculative fallback: %v", err)
 	}
 	defer conn.close()
 	return proxy.next(t), proxy.next(t)
+}
+
+func rejectReusedFallbackObjects(initial, fallback *utls.ClientHelloSpec) error {
+	if initial == fallback {
+		return fmt.Errorf("fallback reused the initial ClientHello spec")
+	}
+	initialObjects := make(map[uintptr]struct{}, len(initial.Extensions))
+	for _, extension := range initial.Extensions {
+		value := reflect.ValueOf(extension)
+		// Go permits distinct zero-sized objects to share an address.
+		if value.Elem().Type().Size() != 0 {
+			initialObjects[value.Pointer()] = struct{}{}
+		}
+	}
+	for _, extension := range fallback.Extensions {
+		if _, reused := initialObjects[reflect.ValueOf(extension).Pointer()]; reused {
+			return fmt.Errorf("fallback reused initial extension object %T", extension)
+		}
+	}
+	return nil
 }
 
 func requireEquivalentClientHellos(t *testing.T, initial, rebuild capturedClientHello) {
@@ -452,6 +474,19 @@ func requireEquivalentClientHellos(t *testing.T, initial, rebuild capturedClient
 	if !slices.Equal(initial.alpn, rebuild.alpn) {
 		t.Fatalf("one connection changed ALPN across its rebuild: %v vs %v", initial.alpn, rebuild.alpn)
 	}
+}
+
+func clientHelloIDCipherSuites(t *testing.T, id utls.ClientHelloID, seed int64) []uint16 {
+	t.Helper()
+	spec, err := utls.UTLSIdToSpecWithSeed(id, seed)
+	if err != nil {
+		t.Fatalf("generate expected ClientHello spec for %q: %v", id.Client, err)
+	}
+	ciphers := slices.Clone(spec.CipherSuites)
+	for i := range ciphers {
+		ciphers[i] = normalizeGREASE(ciphers[i])
+	}
+	return ciphers
 }
 
 func TestClientHelloExtensionOrderStableWithinConnectionRebuild(t *testing.T) {
@@ -472,7 +507,7 @@ func TestClientHelloExtensionOrderStableWithinConnectionRebuild(t *testing.T) {
 	transport.SetInsecureSkipVerify(true)
 	defer transport.Close()
 
-	initial, rebuild := connectThroughFallback(t, transport, proxy)
+	initial, rebuild := connectThroughFallback(t, transport, proxy, rejectReusedFallbackObjects)
 	requireEquivalentClientHellos(t, initial, rebuild)
 }
 
@@ -482,10 +517,11 @@ func TestClientHelloSpecSourcePrecedenceSurvivesRebuild(t *testing.T) {
 	extras := &fingerprint.JA3Extras{ALPN: []string{"h2"}}
 
 	tests := []struct {
-		name        string
-		configure   func(*fingerprint.Preset, *TransportConfig)
-		wantPSKArm  bool
-		wantCiphers []uint16
+		name         string
+		configure    func(*fingerprint.Preset, *TransportConfig)
+		wantPSKArm   bool
+		wantCiphers  []uint16
+		wantSourceID func(*fingerprint.Preset) utls.ClientHelloID
 	}{
 		{
 			name: "CustomJA3 beats preset JA3",
@@ -506,14 +542,22 @@ func TestClientHelloSpecSourcePrecedenceSurvivesRebuild(t *testing.T) {
 			wantCiphers: []uint16{4866},
 		},
 		{
-			name:       "PSK ID beats regular ID",
-			configure:  func(_ *fingerprint.Preset, _ *TransportConfig) {},
+			name: "PSK ID beats regular ID",
+			configure: func(preset *fingerprint.Preset, _ *TransportConfig) {
+				preset.PSKClientHelloID = utls.HelloFirefox_120
+			},
 			wantPSKArm: true,
+			wantSourceID: func(preset *fingerprint.Preset) utls.ClientHelloID {
+				return preset.PSKClientHelloID
+			},
 		},
 		{
 			name: "regular ID when PSK ID is absent",
 			configure: func(preset *fingerprint.Preset, _ *TransportConfig) {
 				preset.PSKClientHelloID = utls.ClientHelloID{}
+			},
+			wantSourceID: func(preset *fingerprint.Preset) utls.ClientHelloID {
+				return preset.ClientHelloID
 			},
 		},
 	}
@@ -540,6 +584,12 @@ func TestClientHelloSpecSourcePrecedenceSurvivesRebuild(t *testing.T) {
 			requireEquivalentClientHellos(t, initial, rebuild)
 			if test.wantCiphers != nil && !slices.Equal(initial.cipherSuites, test.wantCiphers) {
 				t.Fatalf("cipher list %v, want %v", initial.cipherSuites, test.wantCiphers)
+			}
+			if test.wantSourceID != nil {
+				wantCiphers := clientHelloIDCipherSuites(t, test.wantSourceID(preset), transport.shuffleSeed)
+				if !slices.Equal(initial.cipherSuites, wantCiphers) {
+					t.Fatalf("cipher list %v does not come from selected ClientHello ID %q: want %v", initial.cipherSuites, test.wantSourceID(preset).Client, wantCiphers)
+				}
 			}
 		})
 	}
@@ -598,5 +648,37 @@ func TestReorderClientHelloExtensionsRejectsMismatchedSet(t *testing.T) {
 				t.Fatal("reorderClientHelloExtensions succeeded with a mismatched extension set")
 			}
 		})
+	}
+}
+
+func TestClientHelloFallbackReorderErrorPropagates(t *testing.T) {
+	proxy := startFallbackProxy(t)
+	preset := fingerprint.Chrome146Windows()
+	transport := NewHTTP2TransportWithConfig(
+		preset,
+		dns.NewCache(),
+		&ProxyConfig{URL: proxy.url},
+		&TransportConfig{EnableSpeculativeTLS: true},
+	)
+	transport.SetInsecureSkipVerify(true)
+	defer transport.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := transport.establishConn(ctx, "example.com", "443", false, func(_ *utls.ClientHelloSpec, spec *utls.ClientHelloSpec) error {
+		for i, extension := range spec.Extensions {
+			if _, ok := extension.(*utls.SCTExtension); ok {
+				spec.Extensions = append(spec.Extensions[:i], spec.Extensions[i+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("test fallback spec has no SCT extension to remove")
+	})
+	if conn != nil {
+		conn.close()
+		t.Fatal("establishConn returned a connection after the fallback extension set changed")
+	}
+	if err == nil || !strings.Contains(err.Error(), "extension count changed") {
+		t.Fatalf("establishConn error = %v, want propagated fallback extension-set error", err)
 	}
 }
