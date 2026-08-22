@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,9 +55,8 @@ type HTTP2Transport struct {
 	// TLS session resumption cache (shared across connections)
 	sessionCache utls.ClientSessionCache
 
-	// Shuffle seed for consistent TLS extension order across all connections
-	// Chrome shuffles extensions once per session, not per connection
-	// Each connection needs a fresh spec (ApplyPreset mutates it), but same seed
+	// Shuffle seed mixed into ID-based spec generation. uTLS starts from a freshly
+	// shuffled base spec, so this seed alone does not define the final order.
 	shuffleSeed int64
 
 	// Cached spec presence flags - indicate if preset supports these specs
@@ -111,6 +111,55 @@ type persistentConn struct {
 	// meaningful while inFlight > 0, where it distinguishes a slow-but-live
 	// download from a body the caller abandoned without closing.
 	lastProgress atomic.Int64
+}
+
+type clientHelloExtensionKey struct {
+	extensionType reflect.Type
+	genericID     uint16
+	oldChannelID  bool
+}
+
+func extensionKey(extension utls.TLSExtension) clientHelloExtensionKey {
+	key := clientHelloExtensionKey{extensionType: reflect.TypeOf(extension)}
+	switch extension := extension.(type) {
+	case *utls.GenericExtension:
+		key.genericID = extension.Id
+	case *utls.FakeChannelIDExtension:
+		key.oldChannelID = extension.OldExtensionID
+	}
+	return key
+}
+
+func captureClientHelloExtensionOrder(extensions []utls.TLSExtension) []clientHelloExtensionKey {
+	order := make([]clientHelloExtensionKey, len(extensions))
+	for i, extension := range extensions {
+		order[i] = extensionKey(extension)
+	}
+	return order
+}
+
+func reorderClientHelloExtensions(extensions []utls.TLSExtension, order []clientHelloExtensionKey) error {
+	if len(extensions) != len(order) {
+		return fmt.Errorf("extension count changed from %d to %d", len(order), len(extensions))
+	}
+
+	byKey := make(map[clientHelloExtensionKey][]utls.TLSExtension, len(extensions))
+	for _, extension := range extensions {
+		key := extensionKey(extension)
+		byKey[key] = append(byKey[key], extension)
+	}
+
+	reordered := make([]utls.TLSExtension, len(extensions))
+	for i, key := range order {
+		matches := byKey[key]
+		if len(matches) == 0 {
+			return fmt.Errorf("extension set changed: missing %v at position %d", key.extensionType, i)
+		}
+		reordered[i] = matches[0]
+		byKey[key] = matches[1:]
+	}
+	copy(extensions, reordered)
+	return nil
 }
 
 // release marks one request as finished with the connection. If a close was
@@ -257,9 +306,8 @@ func NewHTTP2TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		sessionCache = NewPersistableSessionCache()
 	}
 
-	// Generate random seed for TLS extension shuffling
-	// Chrome shuffles extensions once per session, not per connection
-	// This seed ensures consistent ordering across all connections in this transport
+	// Generate the transport-local seed mixed into ID-based spec generation.
+	// The base spec is still freshly shuffled by uTLS on each generation.
 	var seedBytes [8]byte
 	crand.Read(seedBytes[:])
 	shuffleSeed := int64(binary.LittleEndian.Uint64(seedBytes[:]))
@@ -741,9 +789,9 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
 
-	// Generate fresh spec for this connection to avoid race condition
+	// Generate a fresh spec for this connection to avoid shared mutable state.
 	// utls's ApplyPreset mutates the spec (clears KeyShares.Data, etc.), so each
-	// connection needs its own copy. Use same shuffleSeed for consistent ordering.
+	// connection and retry needs its own spec object.
 	// One resolver for every TLS source, shared with the H1 transport. This used
 	// to be an inline if/else chain whose first arm was `if ja3String != ""`,
 	// taken unconditionally, which made the PSK arm below it unreachable for any
@@ -766,6 +814,10 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 	if specSource == fingerprint.SourceClientHelloID {
 		fingerprint.ApplySignatureAlgorithms(specToUse.Extensions, t.preset.SignatureAlgorithms)
 		fingerprint.ApplyTrustAnchors(&specToUse.Extensions, t.preset.TrustAnchors)
+	}
+	var initialExtensionOrder []clientHelloExtensionKey
+	if specToUse != nil {
+		initialExtensionOrder = captureClientHelloExtensionOrder(specToUse.Extensions)
 	}
 
 	// Fetch ECH config if needed. skipECH forces a no-ECH handshake, used by the
@@ -827,11 +879,9 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 		tlsConfig.ClientSessionCache = t.sessionCache
 	}
 
-	// Create UClient with HelloCustom and apply our fresh spec
-	// This ensures the TLS extension order is consistent across all connections (same seed)
+	// Create UClient with HelloCustom and apply the fresh spec.
 	var tlsConn *utls.UConn
 	if specToUse != nil {
-		// Use fresh spec - extension order is consistent from shuffle seed
 		tlsConn = utls.UClient(rawConn, tlsConfig, utls.HelloCustom)
 		if err := tlsConn.ApplyPreset(specToUse); err != nil {
 			rawConn.Close()
@@ -898,6 +948,16 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 			if fallbackJA3 == "" && fallbackSpec != nil {
 				fingerprint.ApplySignatureAlgorithms(fallbackSpec.Extensions, t.preset.SignatureAlgorithms)
 				fingerprint.ApplyTrustAnchors(&fallbackSpec.Extensions, t.preset.TrustAnchors)
+			}
+			if fallbackSpec == nil && initialExtensionOrder != nil {
+				rawConn.Close()
+				return nil, fmt.Errorf("speculative TLS fallback: failed to regenerate ClientHello spec")
+			}
+			if fallbackSpec != nil && initialExtensionOrder != nil {
+				if reorderErr := reorderClientHelloExtensions(fallbackSpec.Extensions, initialExtensionOrder); reorderErr != nil {
+					rawConn.Close()
+					return nil, fmt.Errorf("speculative TLS fallback: %w", reorderErr)
+				}
 			}
 
 			// Redo TLS handshake on the clean connection
