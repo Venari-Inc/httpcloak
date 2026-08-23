@@ -2,9 +2,7 @@ package pool
 
 import (
 	"context"
-	crand "crypto/rand"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -271,14 +269,11 @@ type HostPool struct {
 	// Chrome reuses sessions - this makes subsequent connections look like real browser
 	sessionCache utls.ClientSessionCache
 
-	// Cached ClientHelloSpec - used to check if PSK spec is available
-	// Note: Do not reuse directly - generate fresh spec per connection to avoid race
+	// Reference ClientHelloSpecs - they record only which spec kinds this preset
+	// can build. Never sent: createConn builds the spec it puts on the wire from
+	// that connection's own shuffle seed.
 	cachedSpec    *utls.ClientHelloSpec
 	cachedPSKSpec *utls.ClientHelloSpec
-
-	// Shuffle seed for generating fresh specs per connection
-	// utls's ApplyPreset mutates specs, so each connection needs its own copy
-	shuffleSeed int64
 
 	// Configuration
 	maxConns    int
@@ -303,33 +298,31 @@ type HostPool struct {
 // Note: This generates its own shuffled specs. For consistent session fingerprinting,
 // use Manager.GetPool() instead which shares cached specs across all hosts.
 func NewHostPool(host, port string, preset *fingerprint.Preset, dnsCache *dns.Cache) *HostPool {
-	// Generate shuffle seed for standalone usage
-	var seedBytes [8]byte
-	crand.Read(seedBytes[:])
-	shuffleSeed := int64(binary.LittleEndian.Uint64(seedBytes[:]))
-
-	// Generate specs for standalone usage (backward compatibility)
+	// Build the reference specs for standalone usage (backward compatibility).
+	// They only record which spec kinds this preset supports, so the seed behind
+	// them never reaches the wire.
+	referenceSeed := newClientHelloShuffleSeed()
 	var cachedSpec, cachedPSKSpec *utls.ClientHelloSpec
 	if preset.JA3 != "" {
 		if spec, err := fingerprint.ParseJA3(preset.JA3, preset.JA3Extras); err == nil {
 			cachedSpec = spec
 		}
-	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, shuffleSeed); err == nil {
+	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, referenceSeed); err == nil {
 		cachedSpec = spec
 	}
 	if preset.JA3 == "" && preset.PSKClientHelloID.Client != "" {
-		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, shuffleSeed); err == nil {
+		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, referenceSeed); err == nil {
 			cachedPSKSpec = spec
 		}
 	}
-	return NewHostPoolWithConfig(host, "", port, preset, dnsCache, false, "", cachedSpec, cachedPSKSpec, shuffleSeed, nil)
+	return NewHostPoolWithConfig(host, "", port, preset, dnsCache, false, "", cachedSpec, cachedPSKSpec, nil)
 }
 
 // NewHostPoolWithConfig creates a pool with TLS and proxy configuration
 // host is the connection host (for DNS resolution, may be connectTo target)
 // sniHost is the TLS ServerName host (original request host, used for SNI)
 // If sniHost is empty, host is used for both DNS and SNI
-func NewHostPoolWithConfig(host, sniHost, port string, preset *fingerprint.Preset, dnsCache *dns.Cache, insecureSkipVerify bool, proxyURL string, cachedSpec, cachedPSKSpec *utls.ClientHelloSpec, shuffleSeed int64, sessionCache utls.ClientSessionCache) *HostPool {
+func NewHostPoolWithConfig(host, sniHost, port string, preset *fingerprint.Preset, dnsCache *dns.Cache, insecureSkipVerify bool, proxyURL string, cachedSpec, cachedPSKSpec *utls.ClientHelloSpec, sessionCache utls.ClientSessionCache) *HostPool {
 	// Use provided session cache or create a new one for backward compatibility
 	if sessionCache == nil {
 		sessionCache = utls.NewLRUClientSessionCache(32)
@@ -354,7 +347,6 @@ func NewHostPoolWithConfig(host, sniHost, port string, preset *fingerprint.Prese
 		proxyURL:             proxyURL,
 		cachedSpec:           cachedSpec,    // Reference spec (for availability check)
 		cachedPSKSpec:        cachedPSKSpec, // Reference PSK spec (for availability check)
-		shuffleSeed:          shuffleSeed,   // Seed for generating fresh specs per connection
 	}
 
 	return pool
@@ -573,6 +565,38 @@ func (p *HostPool) GetConn(ctx context.Context) (*Conn, error) {
 	return conn, nil
 }
 
+// clientHelloSpecForConn builds the ClientHelloSpec for ONE connection from
+// that connection's shuffle seed. Every spec it builds comes from that one seed,
+// so the extension order is stable within the connection and varies between
+// connections.
+//
+// The spec is built fresh every time: utls's ApplyPreset mutates it (clears
+// KeyShares.Data, etc.), so a spec shared between connections would race.
+// Returns nil without an error when the preset can build no spec at all; the
+// caller then falls back to the bare ClientHelloID.
+func (p *HostPool) clientHelloSpecForConn(seed int64) (*utls.ClientHelloSpec, error) {
+	// JA3 preset: parse fresh per connection (ApplyPreset mutates the spec)
+	if p.preset.JA3 != "" {
+		spec, err := fingerprint.ParseJA3(p.preset.JA3, p.preset.JA3Extras)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse JA3: %w", err)
+		}
+		return spec, nil
+	}
+	// Prefer PSK spec when available - Chrome always includes PSK extension structure
+	if p.cachedPSKSpec != nil && p.preset.PSKClientHelloID.Client != "" {
+		if spec, err := tcpClientHelloSpec(p.preset, p.preset.PSKClientHelloID, seed); err == nil {
+			return spec, nil
+		}
+	}
+	if p.cachedSpec != nil {
+		if spec, err := tcpClientHelloSpec(p.preset, p.preset.ClientHelloID, seed); err == nil {
+			return spec, nil
+		}
+	}
+	return nil, nil
+}
+
 // createConn creates a new connection to the host
 // Implements Happy Eyeballs (RFC 8305) for IPv6/IPv4 connection racing
 func (p *HostPool) createConn(ctx context.Context) (*Conn, error) {
@@ -669,33 +693,21 @@ func (p *HostPool) createConn(ctx context.Context) (*Conn, error) {
 	}
 	p.tlsVerify.Apply(tlsConfig)
 
-	// Generate fresh spec for this connection to avoid race condition
-	// utls's ApplyPreset mutates the spec (clears KeyShares.Data, etc.), so each
-	// connection needs its own copy. Use same shuffleSeed for consistent ordering.
-	var specToUse *utls.ClientHelloSpec
-	var tlsConn *utls.UConn
+	// Draw this connection's ClientHello shuffle seed. Chrome has permuted its
+	// extension order on every connection since Chrome 110 (anti-ossification),
+	// so the seed's lifetime is one connection: a seed held on the pool (or on
+	// the manager and handed to every pool) would replay one order for every
+	// connection under it, which no Chrome since 110 does. Every spec built for
+	// THIS connection reuses this same seed, so the order varies per connection
+	// without varying within one.
+	connShuffleSeed := newClientHelloShuffleSeed()
 
-	// JA3 preset: parse fresh per connection (ApplyPreset mutates the spec)
-	if p.preset.JA3 != "" {
-		spec, err := fingerprint.ParseJA3(p.preset.JA3, p.preset.JA3Extras)
-		if err != nil {
-			rawConn.Close()
-			return nil, fmt.Errorf("failed to parse JA3: %w", err)
-		}
-		specToUse = spec
-	} else if p.cachedPSKSpec != nil && p.preset.PSKClientHelloID.Client != "" {
-		// Prefer PSK spec when available - Chrome always includes PSK extension structure
-		// Generate fresh PSK spec for this connection
-		if spec, err := tcpClientHelloSpec(p.preset, p.preset.PSKClientHelloID, p.shuffleSeed); err == nil {
-			specToUse = spec
-		}
+	specToUse, err := p.clientHelloSpecForConn(connShuffleSeed)
+	if err != nil {
+		rawConn.Close()
+		return nil, err
 	}
-	if specToUse == nil && p.cachedSpec != nil && p.preset.JA3 == "" {
-		// Generate fresh regular spec
-		if spec, err := tcpClientHelloSpec(p.preset, p.preset.ClientHelloID, p.shuffleSeed); err == nil {
-			specToUse = spec
-		}
-	}
+	var tlsConn *utls.UConn
 
 	// Create UClient with HelloCustom and apply the fresh spec
 	if specToUse != nil {
@@ -1377,11 +1389,11 @@ type Manager struct {
 	echConfig          []byte               // Custom ECH configuration
 	echConfigDomain    string               // Domain to fetch ECH config from
 
-	// Cached TLS specs - shared across all HostPools for consistent fingerprint
-	// Chrome shuffles extension order once per session, not per connection
+	// Reference TLS specs - shared across all HostPools to record which spec
+	// kinds this preset can build. Never sent: each connection builds its own
+	// spec from its own shuffle seed.
 	cachedSpec    *utls.ClientHelloSpec
 	cachedPSKSpec *utls.ClientHelloSpec
-	shuffleSeed   int64 // Seed used for extension shuffling
 
 	// Shared session cache for TLS session resumption across all pools
 	// This allows session persistence to work across Save/Load
@@ -1399,11 +1411,9 @@ func NewManager(preset *fingerprint.Preset) *Manager {
 
 // NewManagerWithTLSConfig creates a manager with TLS configuration
 func NewManagerWithTLSConfig(preset *fingerprint.Preset, insecureSkipVerify bool) *Manager {
-	// Generate random seed for extension shuffling
-	// This seed is used for all connections in this manager (session)
-	var seedBytes [8]byte
-	crand.Read(seedBytes[:])
-	shuffleSeed := int64(binary.LittleEndian.Uint64(seedBytes[:]))
+	// Seed behind the reference specs below. They are availability records, not
+	// wire material, so this seed never reaches a ClientHello.
+	referenceSeed := newClientHelloShuffleSeed()
 
 	m := &Manager{
 		pools:              make(map[string]*HostPool),
@@ -1411,24 +1421,22 @@ func NewManagerWithTLSConfig(preset *fingerprint.Preset, insecureSkipVerify bool
 		preset:             preset,
 		maxConnsPerHost:    0, // 0 = unlimited by default
 		insecureSkipVerify: insecureSkipVerify,
-		shuffleSeed:        shuffleSeed,
 		cleanupInterval:    30 * time.Second,
 		stopCleanup:        make(chan struct{}),
 	}
 
-	// Generate and cache ClientHelloSpec with shuffled extensions
-	// Chrome shuffles extensions once per session, not per connection
+	// Build the reference specs that record which spec kinds this preset supports
 	if preset.JA3 != "" {
 		if spec, err := fingerprint.ParseJA3(preset.JA3, preset.JA3Extras); err == nil {
 			m.cachedSpec = spec
 		}
-	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, shuffleSeed); err == nil {
+	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, referenceSeed); err == nil {
 		m.cachedSpec = spec
 	}
 
 	// Also cache PSK variant if available (not applicable for JA3 presets)
 	if preset.JA3 == "" && preset.PSKClientHelloID.Client != "" {
-		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, shuffleSeed); err == nil {
+		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, referenceSeed); err == nil {
 			m.cachedPSKSpec = spec
 		}
 	}
@@ -1441,10 +1449,8 @@ func NewManagerWithTLSConfig(preset *fingerprint.Preset, insecureSkipVerify bool
 
 // NewManagerWithProxy creates a manager with proxy support
 func NewManagerWithProxy(preset *fingerprint.Preset, proxyURL string, insecureSkipVerify bool) *Manager {
-	// Generate random seed for extension shuffling
-	var seedBytes [8]byte
-	crand.Read(seedBytes[:])
-	shuffleSeed := int64(binary.LittleEndian.Uint64(seedBytes[:]))
+	// Seed behind the reference specs below - never reaches a ClientHello.
+	referenceSeed := newClientHelloShuffleSeed()
 
 	m := &Manager{
 		pools:              make(map[string]*HostPool),
@@ -1453,23 +1459,22 @@ func NewManagerWithProxy(preset *fingerprint.Preset, proxyURL string, insecureSk
 		maxConnsPerHost:    0, // 0 = unlimited by default
 		proxyURL:           proxyURL,
 		insecureSkipVerify: insecureSkipVerify,
-		shuffleSeed:        shuffleSeed,
 		cleanupInterval:    30 * time.Second,
 		stopCleanup:        make(chan struct{}),
 	}
 
-	// Generate and cache ClientHelloSpec with shuffled extensions
+	// Build the reference specs that record which spec kinds this preset supports
 	if preset.JA3 != "" {
 		if spec, err := fingerprint.ParseJA3(preset.JA3, preset.JA3Extras); err == nil {
 			m.cachedSpec = spec
 		}
-	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, shuffleSeed); err == nil {
+	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, referenceSeed); err == nil {
 		m.cachedSpec = spec
 	}
 
 	// Also cache PSK variant if available (not applicable for JA3 presets)
 	if preset.JA3 == "" && preset.PSKClientHelloID.Client != "" {
-		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, shuffleSeed); err == nil {
+		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, referenceSeed); err == nil {
 			m.cachedPSKSpec = spec
 		}
 	}
@@ -1547,7 +1552,7 @@ func (m *Manager) GetPool(host, port string) (*HostPool, error) {
 	if connectHost != host {
 		sniHost = host // Original request host for TLS ServerName
 	}
-	pool = NewHostPoolWithConfig(connectHost, sniHost, port, m.preset, m.dnsCache, m.insecureSkipVerify, m.proxyURL, m.cachedSpec, m.cachedPSKSpec, m.shuffleSeed, m.sessionCache)
+	pool = NewHostPoolWithConfig(connectHost, sniHost, port, m.preset, m.dnsCache, m.insecureSkipVerify, m.proxyURL, m.cachedSpec, m.cachedPSKSpec, m.sessionCache)
 	pool.tlsVerify = m.tlsVerify
 	if m.maxConnsPerHost > 0 {
 		pool.SetMaxConns(m.maxConnsPerHost)
@@ -1594,17 +1599,18 @@ func (m *Manager) SetPreset(preset *fingerprint.Preset) {
 		return
 	}
 
-	// Rebuild the cached specs from the new profile, mirroring construction.
+	// Rebuild the reference specs from the new profile, mirroring construction.
+	referenceSeed := newClientHelloShuffleSeed()
 	var cachedSpec, cachedPSKSpec *utls.ClientHelloSpec
 	if preset.JA3 != "" {
 		if spec, err := fingerprint.ParseJA3(preset.JA3, preset.JA3Extras); err == nil {
 			cachedSpec = spec
 		}
-	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, m.shuffleSeed); err == nil {
+	} else if spec, err := tcpClientHelloSpec(preset, preset.ClientHelloID, referenceSeed); err == nil {
 		cachedSpec = spec
 	}
 	if preset.JA3 == "" && preset.PSKClientHelloID.Client != "" {
-		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, m.shuffleSeed); err == nil {
+		if spec, err := tcpClientHelloSpec(preset, preset.PSKClientHelloID, referenceSeed); err == nil {
 			cachedPSKSpec = spec
 		}
 	}
