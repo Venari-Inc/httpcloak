@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,9 +55,8 @@ type HTTP2Transport struct {
 	// TLS session resumption cache (shared across connections)
 	sessionCache utls.ClientSessionCache
 
-	// Shuffle seed for consistent TLS extension order across all connections
-	// Chrome shuffles extensions once per session, not per connection
-	// Each connection needs a fresh spec (ApplyPreset mutates it), but same seed
+	// Shuffle seed mixed into ID-based spec generation. uTLS starts from a freshly
+	// shuffled base spec, so this seed alone does not define the final order.
 	shuffleSeed int64
 
 	// Cached spec presence flags - indicate if preset supports these specs
@@ -79,9 +79,9 @@ type HTTP2Transport struct {
 
 // persistentConn represents a persistent HTTP/2 connection
 type persistentConn struct {
-	host            string
-	tlsConn         *utls.UConn
-	h2Conn          *http2.ClientConn
+	host           string
+	tlsConn        *utls.UConn
+	h2Conn         *http2.ClientConn
 	createdAt      time.Time
 	lastUsedAt     time.Time
 	useCount       int64
@@ -98,6 +98,57 @@ type persistentConn struct {
 	// meaningful while inFlight > 0, where it distinguishes a slow-but-live
 	// download from a body the caller abandoned without closing.
 	lastProgress atomic.Int64
+}
+
+type clientHelloExtensionKey struct {
+	extensionType reflect.Type
+	genericID     uint16
+	oldChannelID  bool
+}
+
+type fallbackClientHelloSpecTransform func(initial, fallback *utls.ClientHelloSpec) error
+
+func extensionKey(extension utls.TLSExtension) clientHelloExtensionKey {
+	key := clientHelloExtensionKey{extensionType: reflect.TypeOf(extension)}
+	switch extension := extension.(type) {
+	case *utls.GenericExtension:
+		key.genericID = extension.Id
+	case *utls.FakeChannelIDExtension:
+		key.oldChannelID = extension.OldExtensionID
+	}
+	return key
+}
+
+func captureClientHelloExtensionOrder(extensions []utls.TLSExtension) []clientHelloExtensionKey {
+	order := make([]clientHelloExtensionKey, len(extensions))
+	for i, extension := range extensions {
+		order[i] = extensionKey(extension)
+	}
+	return order
+}
+
+func reorderClientHelloExtensions(extensions []utls.TLSExtension, order []clientHelloExtensionKey) error {
+	if len(extensions) != len(order) {
+		return fmt.Errorf("extension count changed from %d to %d", len(order), len(extensions))
+	}
+
+	byKey := make(map[clientHelloExtensionKey][]utls.TLSExtension, len(extensions))
+	for _, extension := range extensions {
+		key := extensionKey(extension)
+		byKey[key] = append(byKey[key], extension)
+	}
+
+	reordered := make([]utls.TLSExtension, len(extensions))
+	for i, key := range order {
+		matches := byKey[key]
+		if len(matches) == 0 {
+			return fmt.Errorf("extension set changed: missing %v at position %d", key.extensionType, i)
+		}
+		reordered[i] = matches[0]
+		byKey[key] = matches[1:]
+	}
+	copy(extensions, reordered)
+	return nil
 }
 
 // release marks one request as finished with the connection. If a close was
@@ -242,9 +293,8 @@ func NewHTTP2TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		sessionCache = NewPersistableSessionCache()
 	}
 
-	// Generate random seed for TLS extension shuffling
-	// Chrome shuffles extensions once per session, not per connection
-	// This seed ensures consistent ordering across all connections in this transport
+	// Generate the transport-local seed mixed into ID-based spec generation.
+	// The base spec is still freshly shuffled by uTLS on each generation.
 	var seedBytes [8]byte
 	crand.Read(seedBytes[:])
 	shuffleSeed := int64(binary.LittleEndian.Uint64(seedBytes[:]))
@@ -259,16 +309,16 @@ func NewHTTP2TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 	}
 
 	t := &HTTP2Transport{
-		preset:         preset,
-		dnsCache:       dnsCache,
-		proxy:          proxy,
-		config:         config,
-		conns:          make(map[string]*persistentConn),
-		sessionCache:   sessionCache,
-		shuffleSeed:    shuffleSeed,
-		hasPSKSpec:     hasPSKSpec,
-		maxIdleTime: 90 * time.Second,
-		maxConnAge:  5 * time.Minute,
+		preset:       preset,
+		dnsCache:     dnsCache,
+		proxy:        proxy,
+		config:       config,
+		conns:        make(map[string]*persistentConn),
+		sessionCache: sessionCache,
+		shuffleSeed:  shuffleSeed,
+		hasPSKSpec:   hasPSKSpec,
+		maxIdleTime:  90 * time.Second,
+		maxConnAge:   5 * time.Minute,
 		// A response body that has not produced a single byte for this long is
 		// treated as abandoned by its caller, so the connection can be
 		// reclaimed. Without a bound here, a caller that never closes a body
@@ -565,17 +615,17 @@ func (t *HTTP2Transport) isConnDestroyable(conn *persistentConn) bool {
 // the connection still establishes (SNI visible) instead of failing H2 and
 // cascading to H1. An ALPNMismatchError is never retried here — it carries a live
 // TLS connection the caller reuses for H1.
-func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*persistentConn, error) {
+func (t *HTTP2Transport) createConn(ctx context.Context, host, port string, fallbackSpecTransform ...fallbackClientHelloSpecTransform) (*persistentConn, error) {
 	// No ECH configured, or this host recently stalled/rejected ECH: dial once,
 	// skipping ECH when the host is known ECH-incompatible.
 	if !t.echConfigured() || dns.IsECHIncompatible(host) {
-		return t.establishConn(ctx, host, port, t.echConfigured() && dns.IsECHIncompatible(host))
+		return t.establishConn(ctx, host, port, t.echConfigured() && dns.IsECHIncompatible(host), fallbackSpecTransform...)
 	}
 	// Time-box the ECH attempt so a target that STALLS on an incompatible ECH
 	// ClientHello (issue #74 — some servers stall rather than cleanly reject) fails
 	// fast, leaving budget to retry without ECH within the same request deadline.
 	echCtx, cancel := boundedECHAttempt(ctx)
-	conn, err := t.establishConn(echCtx, host, port, false)
+	conn, err := t.establishConn(echCtx, host, port, false, fallbackSpecTransform...)
 	cancel()
 	if err == nil {
 		return conn, nil
@@ -593,7 +643,7 @@ func (t *HTTP2Transport) createConn(ctx context.Context, host, port string) (*pe
 	// future connections skip the stall, and retry now without ECH.
 	if echCausedDialFailure(err) || errors.Is(err, context.DeadlineExceeded) {
 		dns.MarkECHIncompatible(host)
-		return t.establishConn(ctx, host, port, true)
+		return t.establishConn(ctx, host, port, true, fallbackSpecTransform...)
 	}
 	return conn, err
 }
@@ -606,7 +656,7 @@ func (t *HTTP2Transport) echConfigured() bool {
 
 // establishConn creates a new persistent connection. skipECH forces a no-ECH
 // handshake (see createConn's graceful-degradation retry).
-func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, skipECH bool) (*persistentConn, error) {
+func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, skipECH bool, fallbackSpecTransform ...fallbackClientHelloSpecTransform) (*persistentConn, error) {
 	var rawConn net.Conn
 	var err error
 
@@ -688,9 +738,9 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
 
-	// Generate fresh spec for this connection to avoid race condition
+	// Generate a fresh spec for this connection to avoid shared mutable state.
 	// utls's ApplyPreset mutates the spec (clears KeyShares.Data, etc.), so each
-	// connection needs its own copy. Use same shuffleSeed for consistent ordering.
+	// connection and retry needs its own spec object.
 	var specToUse *utls.ClientHelloSpec
 	// Determine JA3 source: config.CustomJA3 takes priority, then preset.JA3
 	ja3String := ""
@@ -727,6 +777,10 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 	// own sig-algs via JA3Extras, so it is skipped here.
 	if ja3String == "" && specToUse != nil {
 		fingerprint.ApplySignatureAlgorithms(specToUse.Extensions, t.preset.SignatureAlgorithms)
+	}
+	var initialExtensionOrder []clientHelloExtensionKey
+	if specToUse != nil {
+		initialExtensionOrder = captureClientHelloExtensionOrder(specToUse.Extensions)
 	}
 
 	// Fetch ECH config if needed. skipECH forces a no-ECH handshake, used by the
@@ -777,11 +831,9 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 		tlsConfig.ClientSessionCache = t.sessionCache
 	}
 
-	// Create UClient with HelloCustom and apply our fresh spec
-	// This ensures the TLS extension order is consistent across all connections (same seed)
+	// Create UClient with HelloCustom and apply the fresh spec.
 	var tlsConn *utls.UConn
 	if specToUse != nil {
-		// Use fresh spec - extension order is consistent from shuffle seed
 		tlsConn = utls.UClient(rawConn, tlsConfig, utls.HelloCustom)
 		if err := tlsConn.ApplyPreset(specToUse); err != nil {
 			rawConn.Close()
@@ -846,6 +898,22 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 			// Keep the same TCP signature_algorithms override on the fallback spec.
 			if fallbackJA3 == "" && fallbackSpec != nil {
 				fingerprint.ApplySignatureAlgorithms(fallbackSpec.Extensions, t.preset.SignatureAlgorithms)
+			}
+			if fallbackSpec != nil && len(fallbackSpecTransform) != 0 {
+				if transformErr := fallbackSpecTransform[0](specToUse, fallbackSpec); transformErr != nil {
+					rawConn.Close()
+					return nil, fmt.Errorf("speculative TLS fallback: %w", transformErr)
+				}
+			}
+			if fallbackSpec == nil && initialExtensionOrder != nil {
+				rawConn.Close()
+				return nil, fmt.Errorf("speculative TLS fallback: failed to regenerate ClientHello spec")
+			}
+			if fallbackSpec != nil && initialExtensionOrder != nil {
+				if reorderErr := reorderClientHelloExtensions(fallbackSpec.Extensions, initialExtensionOrder); reorderErr != nil {
+					rawConn.Close()
+					return nil, fmt.Errorf("speculative TLS fallback: %w", reorderErr)
+				}
 			}
 
 			// Redo TLS handshake on the clean connection
@@ -973,7 +1041,7 @@ alpnCheck:
 		Settings:           h2Settings,
 		SettingsOrder:      h2SettingsOrder,
 		DisableCookieSplit: t.preset.H2DisableCookieSplit(),
-		PseudoHeaderOrder: pseudoOrder,
+		PseudoHeaderOrder:  pseudoOrder,
 		HeaderPriority: func() *http2.PriorityParam {
 			// Chrome 120+ uses RFC 9218 extensible priorities (priority: header)
 			// instead of RFC 7540 PRIORITY frames. StreamWeight=0 means no PRIORITY data.
@@ -1620,4 +1688,3 @@ func uint16sToSettingIDs(ids []uint16) []http2.SettingID {
 	}
 	return result
 }
-
