@@ -420,3 +420,61 @@ func TestHostPoolDialFailureDoesNotPinTheNextConnectionsOrder(t *testing.T) {
 	}
 	requireSameClientHelloShape(t, first, second)
 }
+
+// specExtensionOrder renders a spec's extension order the same way
+// seedExtensionOrder renders utls's own, so the two are comparable.
+func specExtensionOrder(spec *utls.ClientHelloSpec) string {
+	order := ""
+	for _, extension := range spec.Extensions {
+		order += fmt.Sprintf("%T|", extension)
+	}
+	return order
+}
+
+// TestHostPoolSpecRebuildWithinOneConnectionKeepsTheSameOrder is the inverse
+// case of the per-connection seed: the seed varies BETWEEN connections, so it
+// must not vary WITHIN one. Every spec built for a single connection comes from
+// that connection's one seed, so a rebuild inside the connection reproduces the
+// order already put on the wire.
+//
+// The pool path has no speculative-TLS fallback (the rebuild site that exists
+// in transport/), so the rebuild is exercised at the pool's per-connection spec
+// builder directly. The expected order comes from utls's own
+// UTLSIdToSpecWithSeed, not from the pool code under test.
+func TestHostPoolSpecRebuildWithinOneConnectionKeepsTheSameOrder(t *testing.T) {
+	server := startClientHelloServer(t)
+	preset := deterministicSpecPreset(t)
+	pool := newSeedTestPool(t, preset, server, 4242)
+
+	const connSeed int64 = 987654321
+	want := seedExtensionOrder(t, deterministicBaseSpecID, connSeed)
+
+	first, err := pool.clientHelloSpecForConn(connSeed)
+	if err != nil {
+		t.Fatalf("build first spec for the connection: %v", err)
+	}
+	second, err := pool.clientHelloSpecForConn(connSeed)
+	if err != nil {
+		t.Fatalf("rebuild the spec inside the same connection: %v", err)
+	}
+	if first == nil || second == nil {
+		t.Fatalf("preset built no spec at all: first=%v second=%v", first, second)
+	}
+
+	if got := specExtensionOrder(first); got != want {
+		t.Fatalf("the connection's first spec does not match the order utls derives from the same seed:\n got: %s\nwant: %s", got, want)
+	}
+	if got := specExtensionOrder(second); got != want {
+		t.Fatalf("rebuilding inside one connection changed the extension order:\n got: %s\nwant: %s", got, want)
+	}
+
+	// The order must repeat without the spec object repeating: utls's
+	// ApplyPreset mutates the spec it is handed, so a shared object would
+	// corrupt the connection that borrowed it.
+	if first == second {
+		t.Fatal("the rebuild returned the same spec object, so the two connections' handshakes would share mutable state")
+	}
+	if len(first.Extensions) > 0 && len(second.Extensions) > 0 && first.Extensions[0] == second.Extensions[0] {
+		t.Fatal("the rebuild reused the same extension objects, so ApplyPreset would mutate both specs at once")
+	}
+}
