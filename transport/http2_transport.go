@@ -55,10 +55,6 @@ type HTTP2Transport struct {
 	// TLS session resumption cache (shared across connections)
 	sessionCache utls.ClientSessionCache
 
-	// Shuffle seed mixed into ID-based spec generation. uTLS starts from a freshly
-	// shuffled base spec, so this seed alone does not define the final order.
-	shuffleSeed int64
-
 	// Cached spec presence flags - indicate if preset supports these specs
 	// We don't cache the actual spec objects as ApplyPreset mutates them
 	hasPSKSpec bool
@@ -308,12 +304,6 @@ func NewHTTP2TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		sessionCache = NewPersistableSessionCache()
 	}
 
-	// Generate the transport-local seed mixed into ID-based spec generation.
-	// The base spec is still freshly shuffled by uTLS on each generation.
-	var seedBytes [8]byte
-	crand.Read(seedBytes[:])
-	shuffleSeed := int64(binary.LittleEndian.Uint64(seedBytes[:]))
-
 	// Whether this preset can produce a resumption-shaped ClientHello at all.
 	//
 	// This used to ask whether the JA3 string contained extension 41. That can
@@ -333,7 +323,6 @@ func NewHTTP2TransportWithConfig(preset *fingerprint.Preset, dnsCache *dns.Cache
 		config:       config,
 		conns:        make(map[string]*persistentConn),
 		sessionCache: sessionCache,
-		shuffleSeed:  shuffleSeed,
 		hasPSKSpec:   hasPSKSpec,
 		maxIdleTime:  90 * time.Second,
 		maxConnAge:   5 * time.Minute,
@@ -697,6 +686,16 @@ func (t *HTTP2Transport) echConfigured() bool {
 
 // establishConn creates a new persistent connection. skipECH forces a no-ECH
 // handshake (see createConn's graceful-degradation retry).
+// newClientHelloShuffleSeed draws one ClientHello extension-shuffle seed. It is
+// called once per connection: Chrome permutes its extension order on every
+// connection (shipped in Chrome 110), so a seed that outlives a single
+// connection would pin one order for every connection that reuses it.
+func newClientHelloShuffleSeed() int64 {
+	var seedBytes [8]byte
+	crand.Read(seedBytes[:])
+	return int64(binary.LittleEndian.Uint64(seedBytes[:]))
+}
+
 func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, skipECH bool, fallbackSpecTransform ...fallbackClientHelloSpecTransform) (*persistentConn, error) {
 	var rawConn net.Conn
 	var err error
@@ -791,6 +790,15 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
 
+	// Draw this connection's ClientHello shuffle seed. Chrome has permuted its
+	// extension order on every connection since Chrome 110 (anti-ossification),
+	// so the seed's lifetime is one connection: a seed held on the transport
+	// would replay one order for every connection it opens, which no Chrome
+	// since 110 does. Every spec built for THIS connection — including the
+	// speculative-TLS fallback rebuild below — reuses this same seed, so the
+	// order varies per connection without varying within one.
+	connShuffleSeed := newClientHelloShuffleSeed()
+
 	// Generate a fresh spec for this connection to avoid shared mutable state.
 	// utls's ApplyPreset mutates the spec (clears KeyShares.Data, etc.), so each
 	// connection and retry needs its own spec object.
@@ -804,7 +812,7 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 		customJA3, customJA3Extras = t.config.CustomJA3, t.config.CustomJA3Extras
 	}
 	specToUse, specSource, specErr := fingerprint.ResolveClientHelloSpec(
-		t.preset, customJA3, customJA3Extras, t.hasPSKSpec, t.shuffleSeed)
+		t.preset, customJA3, customJA3Extras, t.hasPSKSpec, connShuffleSeed)
 	if specErr != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("resolve client hello: %w", specErr)
@@ -937,12 +945,12 @@ func (t *HTTP2Transport) establishConn(ctx context.Context, host, port string, s
 				}
 				fallbackSpec = spec
 			} else if t.hasPSKSpec {
-				if spec, specErr := utls.UTLSIdToSpecWithSeed(t.preset.PSKClientHelloID, t.shuffleSeed); specErr == nil {
+				if spec, specErr := utls.UTLSIdToSpecWithSeed(t.preset.PSKClientHelloID, connShuffleSeed); specErr == nil {
 					fallbackSpec = &spec
 				}
 			}
 			if fallbackSpec == nil {
-				if spec, specErr := utls.UTLSIdToSpecWithSeed(t.preset.ClientHelloID, t.shuffleSeed); specErr == nil {
+				if spec, specErr := utls.UTLSIdToSpecWithSeed(t.preset.ClientHelloID, connShuffleSeed); specErr == nil {
 					fallbackSpec = &spec
 				}
 			}
