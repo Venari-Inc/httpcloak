@@ -586,7 +586,9 @@ func TestClientHelloSpecSourcePrecedenceSurvivesRebuild(t *testing.T) {
 				t.Fatalf("cipher list %v, want %v", initial.cipherSuites, test.wantCiphers)
 			}
 			if test.wantSourceID != nil {
-				wantCiphers := clientHelloIDCipherSuites(t, test.wantSourceID(preset), transport.shuffleSeed)
+				// The shuffle seed permutes Extensions only, never CipherSuites,
+				// so any seed yields the cipher list this ClientHelloID implies.
+				wantCiphers := clientHelloIDCipherSuites(t, test.wantSourceID(preset), 0)
 				if !slices.Equal(initial.cipherSuites, wantCiphers) {
 					t.Fatalf("cipher list %v does not come from selected ClientHello ID %q: want %v", initial.cipherSuites, test.wantSourceID(preset).Client, wantCiphers)
 				}
